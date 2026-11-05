@@ -46,6 +46,12 @@ Flags:
   --new / --fresh        task mode: ignore the persisted session and start brand-new
   --dir <path>           prefer sessions in this directory; task cwd
   --model <model#var>    forwarded to opencode run as -m
+  --auto                 auto-approve opencode ask permissions via --auto (explicit opt-in for trusted unattended only; deny stays enforced)
+  --no-auto              do not pass --auto (default); ask rules are auto-rejected headlessly (surfaced as ⚠, never silent success)
+  --parallel             run tasks in parallel (scheduler + independent workers; default concurrency 3)
+  --workers <n>          parallel worker/concurrency limit (default 3, min 1)
+  --sequential           force single-worker execution (debugging)
+  --resume <dir>         load parallel-state.json from dir and print a safe resume plan (never auto-reruns write work)
   --opencode <path>      opencode binary (or set FACTORY_OPENCODE)
   --limit <n>            latest messages replayed per session (default 200)
   --packet-speed <ms>    backfill pacing, one event per tick (default 400)
@@ -88,11 +94,16 @@ export function parseArgs(argv) {
     packetSpeed: 400,
     fast: false,
     model: null,
+    auto: false,
+    parallel: false,
+    workers: 3,
+    sequential: false,
     opencode: null,
     task: null,
     help: false,
     version: false,
     nolimit: null,
+    resume: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -146,6 +157,22 @@ export function parseArgs(argv) {
       options.follow = false;
     } else if (arg === '--fast') {
       options.fast = true;
+    } else if (arg === '--auto') {
+      options.auto = true;
+    } else if (arg === '--no-auto') {
+      options.auto = false;
+    } else if (arg === '--parallel') {
+      options.parallel = true;
+    } else if (arg === '--resume') {
+      options.resume = requireValue(argv, index, arg);
+      index += 1;
+    } else if (arg === '--sequential') {
+      options.sequential = true;
+      options.parallel = false;
+    } else if (arg === '--workers') {
+      options.workers = parsePositiveInt(requireValue(argv, index, arg), '--workers', 1);
+      options.parallel = true;
+      index += 1;
     } else if (!arg.startsWith('-')) {
       if (options.task) options.task = `${options.task} ${arg}`;
       else options.task = arg;
@@ -351,6 +378,8 @@ async function runTui(mode, options) {
   let activeRun = null;
   let preparingRun = false;
   let abortRequested = false;
+  let hadPermissionFailure = false;
+  let permissionFailureMessage = '';
   let killTimer = null;
   let attachTimer = null;
   let lastText = '';
@@ -379,6 +408,7 @@ async function runTui(mode, options) {
   const restore = () => {
     if (restored) return;
     restored = true;
+    try { out.write('\x1b[?2004l'); } catch {}
     if (renderTimer) clearInterval(renderTimer);
     if (pollTimer) clearInterval(pollTimer);
     if (killTimer) clearTimeout(killTimer);
@@ -468,8 +498,39 @@ async function runTui(mode, options) {
       lastText = parsed.text;
       app.addLog(`▸ ${truncate(parsed.text, 110)}`);
     }
-    for (const event of parsed.events) app.applyEvent(event);
-    if (parsed.error) app.addLog(`! ${truncate(parsed.error, 100)}`);
+    if (parsed.permission) {
+      const action = parsed.permission.action ?? 'permission';
+      const pattern = parsed.permission.pattern ?? '';
+      const label = `⚠ permission requested: ${action}${pattern ? ` (${pattern})` : ''}`;
+      app.addLog(label);
+      hadPermissionFailure = true;
+      permissionFailureMessage = label;
+      const alreadyApplied = (parsed.events ?? []).some((event) => event?.text === label);
+      if (!alreadyApplied) {
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: label });
+      }
+    }
+    for (const event of parsed.events ?? []) app.applyEvent(event);
+    if (parsed.error) {
+      const rawError = String(parsed.error);
+      const denied = /permission denied/i.test(rawError);
+      if (denied) {
+        // Idempotent label: parsed.error may already start with
+        // "Permission denied: ..." (e.g. from parseRunLine tool errors), so
+        // strip that prefix before adding it, avoiding
+        // "⚠ permission denied: Permission denied: ...".
+        const detail = rawError.replace(/^\s*permission denied:\s*/i, '');
+        app.addLog(`⚠ permission denied: ${truncate(detail, 100)}`);
+        hadPermissionFailure = true;
+        permissionFailureMessage = truncate(rawError, 100);
+      } else {
+        app.addLog(`! ${truncate(rawError, 100)}`);
+        if (/tool execution interrupted|permission requested/i.test(rawError)) {
+          hadPermissionFailure = true;
+          permissionFailureMessage = truncate(rawError, 100);
+        }
+      }
+    }
   };
 
   const finishTask = (result) => {
@@ -500,6 +561,11 @@ async function runTui(mode, options) {
       app.finishRun('aborted');
       app.addLog(`■ aborted after ${elapsed}s`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: '■ task aborted' });
+    } else if (result.code === 0 && hadPermissionFailure) {
+      const message = permissionFailureMessage || 'permission denied — see log';
+      app.finishRun('error', message);
+      app.addLog(`! ${truncate(message, 110)}`);
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ permission failure: ${truncate(message, 80)}` });
     } else if (result.code === 0) {
       const detail = lastText.trim();
       app.finishRun('done', detail);
@@ -543,7 +609,10 @@ async function runTui(mode, options) {
   };
 
   const startTask = async (raw) => {
-    const task = String(raw ?? '').trim();
+    const rawValue = String(raw ?? '');
+    // Preserve the prompt byte-for-byte except outer whitespace for emptiness check.
+    // Inner newlines, indentation, Unicode are untouched.
+    const task = rawValue.trim() ? rawValue.replace(/^\s+|\s+$/g, '') : '';
     if (!task) return;
     if (activeRun || preparingRun) {
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'run active · press esc to abort' });
@@ -623,16 +692,32 @@ async function runTui(mode, options) {
     source = null;
     lastText = '';
     abortRequested = false;
+    hadPermissionFailure = false;
+    permissionFailureMessage = '';
     runToken += 1;
     const token = runToken;
     const resumed = Boolean(currentSessionID);
-    app.startRun({ sessionID: currentSessionID, resumed });
+    app.startRun({
+      sessionID: currentSessionID,
+      resumed,
+      parallel: options.parallel ? { workers: options.sequential ? 1 : (options.workers ?? 3) } : null,
+    });
+    if (options.parallel || options.sequential) {
+      app.setParallelEnabled(true);
+      app.setParallelWorkers([{ workerId: 'w_main', taskId: 'main', role: 'orchestrator', sessionId: currentSessionID, state: 'running' }]);
+      app.addLog(`parallel mode: scheduler enabled (${options.sequential ? 1 : (options.workers ?? 3)} workers)`);
+    }
     if (currentSessionID) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
     }
     preparingRun = true;
     app.addLog(`▶ ${truncate(task, 110)}`);
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: `▶ ${truncate(task, 80)}` });
+    if (options.auto === true) {
+      const warn = '⚠ auto-approve ON: ask→allow, deny enforced — trusted unattended only';
+      app.addLog(warn);
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: warn });
+    }
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'preparing built-in opencode-nolimit…' });
     const nolimit = await ensureNolimit();
     preparingRun = false;
@@ -648,6 +733,7 @@ async function runTui(mode, options) {
       handle = launchRun({
         task,
         model: options.model,
+        auto: options.auto,
         dir: options.dir,
         bin: options.opencode,
         sessionID: currentSessionID,
@@ -739,6 +825,9 @@ async function runTui(mode, options) {
 
     out.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
     screenEntered = true;
+    // Enable bracketed paste (terminals send \x1b[200~ … \x1b[201~ markers,
+    // letting LineInput insert multi-line pastes verbatim without submitting).
+    try { out.write('\x1b[?2004h'); } catch {}
     out.write(app.frame());
     if (input.isTTY) {
       input.setRawMode(true);
@@ -857,6 +946,22 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (options.nolimit) return nolimitCommand(options.nolimit);
+  if (options.resume != null) {
+    const { loadParallelState, resumePlan } = await import('./parallelState.js');
+    const saved = loadParallelState(options.resume);
+    if (!saved) {
+      process.stdout.write(`No parallel state in ${options.resume} (nothing to resume).\n`);
+      return 1;
+    }
+    const plan = resumePlan(saved, new Set());
+    process.stdout.write(`Resume plan from ${options.resume}:\n`);
+    process.stdout.write(`  resumable (read-only/idempotent): ${plan.resumable.length}\n`);
+    for (const r of plan.resumable) process.stdout.write(`   - ${r.taskId} (${r.reason})\n`);
+    process.stdout.write(`  needs review (write tasks, not auto-rerun): ${plan.needsReview.length}\n`);
+    for (const r of plan.needsReview) process.stdout.write(`   - ${r.taskId} (${r.reason}): ${r.note}\n`);
+    process.stdout.write(`  interrupted workers: ${plan.interrupted.length}\n`);
+    return 0;
+  }
 
   const isTTY = Boolean(process.stdout.isTTY);
   let mode = chooseMode(options, isTTY);

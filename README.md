@@ -127,6 +127,7 @@ Flags:
 | --- | --- |
 | `--session <id\|slug>` (or `--attach`) | Continue that session (passed to `opencode run` as `--session`) and persist it. |
 | `--new` / `--fresh` | Ignore the persisted session; the next task starts a brand-new one. |
+| `--auto` / `--no-auto` | `--auto` is explicit opt-in for trusted unattended only (auto-approves `ask`; warns at run start). Default omits `--auto`; last flag wins. `deny` stays enforced either way. |
 
 Composer commands (typed in place of a task, they never spawn `opencode run`):
 
@@ -232,6 +233,7 @@ hides, or colour escapes. `NO_COLOR` is honoured in TTY mode as well.
 | `--attach <id\|slug>` | Alias for `--session`. |
 | `--session <id\|slug>` | Exact id, id prefix, or exact slug. A child id is climbed to its root. |
 | `--model <provider/model#variant>` | Forwarded to `opencode run` as `-m`. Task mode only. |
+| `--auto` / `--no-auto` | Pass (opt-in) or omit `--auto` for `opencode run`. Task mode only. See Tasks above. |
 | `--opencode <path>` | OpenCode binary. `FACTORY_OPENCODE` also works. Task mode only. |
 | `--dir <path>` | Prefer root sessions whose `directory` equals or ends with the path; task working directory. |
 | `--snapshot [n]` | Render `n` plain-text frames (default `1`) and exit 0. The final frame is fully evolved. No alternate screen / hidden cursor. Task mode is not snapshot-capable. |
@@ -319,5 +321,19 @@ test/               node:test suites and the JSONL fixture
   applied immediately; the live JSONL stream is the real animation source.
 - In task mode `q` quits only on an empty composer, so a task cannot start with
   a bare `q`. Use Ctrl-C when in doubt.
-- No `--auto` is injected into `opencode run`; permission behavior is whatever
-  OpenCode is configured to do.
+- Task mode defaults to **safe** mode: no `--auto` is injected (interactive approve is impossible via `opencode run` — stdin is `ignore`
+  and no permission event exists in the JSONL stream). An `ask` match therefore
+  aborts headlessly with `! permission requested: <action>
+  (<pattern>); auto-rejecting` on stderr plus `Tool execution interrupted` /
+  `Step interrupted` on JSONL (exit 1) — the TUI surfaces that line as
+  `⚠ permission requested: ...` and tool denials as `⚠ Permission denied: ...`
+  instead of an opaque failure. A permission failure is never silent success:
+  even on exit 0 the run reports `error` when a permission/tool denial was seen.
+  Pass `--auto` only for trusted unattended executions (warns at run start);
+  `--auto` auto-approves `ask` rules (for example `external_directory`, `*.env`,
+  `rm -rf*`, `kubectl apply*`, `aws *`); `deny` rules remain enforced in both modes
+  (for example `git push` still fails with `Permission denied: shell`).
+  A narrow `external_directory` allow for this `workin_on/` workspace is kept in
+  `config/opencode/opencode.json` and synced idempotently to the live global config by
+  `src/nolimit.js` — no global allow-all, no `/Users/guivonahn/*` wildcard.
+  The last of `--auto` / `--no-auto` wins.

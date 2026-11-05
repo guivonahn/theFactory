@@ -1,0 +1,109 @@
+/**
+ * Worker manager (Phase 3): each worker is an independent `opencode run`
+ * process with its own session ID. Multiple workers of the same role allowed.
+ * Built on launchRun (src/run.js). Zero dependencies.
+ *
+ * Worker record:
+ * { workerId, runId, taskId, role, model, dir, sessionId, pid,
+ *   state: queued|running|completed|failed|cancelled, startedAt, finishedAt,
+ *   output, error, handle }
+ */
+
+import { launchRun } from './run.js';
+import { createEventBus } from './events.js';
+
+let workerSeq = 0;
+
+export function buildWorkerPrompt({ objective, task, artifacts = [] } = {}) {
+  const parts = [
+    `Objective: ${objective ?? task?.title ?? ''}`,
+    `Task: ${task?.title ?? ''} (${task?.id ?? ''})`,
+  ];
+  if (task?.acceptance) parts.push(`Acceptance: ${task.acceptance}`);
+  if (task?.files?.length) parts.push(`Scope: ${task.files.join(', ')}`);
+  if (artifacts.length) parts.push(`Inputs: ${artifacts.join(', ')}`);
+  parts.push('Do only the assigned task. Do not edit outside your workspace.');
+  return parts.join('\n');
+}
+
+export function createWorkerManager(options = {}) {
+  const bus = options.bus ?? createEventBus();
+  const workers = new Map();
+
+  function workerId() { return `w_${Date.now()}_${(workerSeq += 1)}`; }
+
+  function start({ runId, task, objective, artifacts = [], model, dir, bin, auto = false } = {}) {
+    if (!task?.id) throw new Error('task id is required');
+    const id = workerId();
+    const role = task.agent ?? 'orchestrator';
+    const record = {
+      workerId: id, runId: runId ?? null, taskId: task.id, role, model: model ?? null,
+      dir: dir ?? process.cwd(), sessionId: null, pid: null,
+      state: 'queued', startedAt: Date.now(), finishedAt: null,
+      output: '', error: null, handle: null,
+    };
+    workers.set(id, record);
+    bus.publish({ runId: record.runId, workerId: id, taskId: task.id, kind: 'assigned', text: `${role}:${task.id} assigned` });
+
+    const prompt = buildWorkerPrompt({ objective, task, artifacts });
+    const handle = launchRun({
+      task: prompt,
+      agent: role,
+      model,
+      dir: record.dir,
+      bin,
+      auto,
+      onSpawn: (pid) => { record.pid = pid; bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'started', text: `pid ${pid}`, meta: { pid } }); },
+      onSessionID: (sid) => {
+        record.sessionId = sid;
+        bus.publish({ runId, workerId: id, taskId: task.id, sessionId: sid, kind: 'session', text: sid });
+      },
+      onEvent: (parsed) => {
+        if (parsed.sessionID && !record.sessionId) record.sessionId = parsed.sessionID;
+        if (parsed.text) record.output = parsed.text;
+        if (parsed.error) record.error = parsed.error;
+        for (const ev of parsed.events ?? []) {
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { fanout: !!ev.fanout, to: ev.to ?? null } });
+        }
+        if (parsed.permission) {
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'permission', text: `⚠ permission requested: ${parsed.permission.action}`, meta: parsed.permission });
+        }
+        if (parsed.error) {
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'failure', text: `✗ ${parsed.error}` });
+        }
+      },
+      onError: (error) => { record.error = String(error?.message ?? error); },
+    });
+    record.handle = handle;
+    record.state = 'running';
+    bus.publish({ runId, workerId: id, taskId: task.id, kind: 'worker-started', text: `${role} worker ${id} started` });
+
+    const done = handle.done.then((result) => {
+      record.finishedAt = Date.now();
+      if (result.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
+      else if (result.code === 0) record.state = 'completed';
+      else { record.state = 'failed'; record.error = record.error ?? `exit ${result.code}`; }
+      bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: record.state, text: `${record.state}: ${task.id}`, meta: { code: result.code ?? null } });
+      return record;
+    });
+    return { record, done, handle };
+  }
+
+  function cancel(workerIdValue) {
+    const record = workers.get(workerIdValue);
+    if (!record) throw new Error(`unknown worker: ${workerIdValue}`);
+    if (!record.handle) throw new Error(`worker not started: ${workerIdValue}`);
+    const killed = record.handle.kill('SIGTERM');
+    record.state = 'cancelled';
+    bus.publish({ runId: record.runId, workerId: workerIdValue, taskId: record.taskId, sessionId: record.sessionId, kind: 'cancelled', text: `cancelled ${workerIdValue}` });
+    return killed;
+  }
+
+  function list() { return [...workers.values()].map((r) => ({ workerId: r.workerId, taskId: r.taskId, role: r.role, sessionId: r.sessionId, state: r.state })); }
+  function counts() {
+    const out = { total: workers.size, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    for (const r of workers.values()) out[r.state] = (out[r.state] ?? 0) + 1;
+    return out;
+  }
+  return { bus, start, cancel, list, counts, workers };
+}

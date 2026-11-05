@@ -5,3 +5,7 @@ import './demo.test.js';
 import './run.test.js';
 import './log.test.js';
 import './sessionState.test.js';
+import './scheduler.test.js';
+import './parallel.test.js';
+import './serve.test.js';
+import './input.test.js';
