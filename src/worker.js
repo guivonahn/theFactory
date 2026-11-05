@@ -32,12 +32,21 @@ export function createWorkerManager(options = {}) {
 
   function workerId() { return `w_${Date.now()}_${(workerSeq += 1)}`; }
 
+  function nextModel(requested, idx) {
+    const fallbacks = options.fallbackModels ?? [];
+    // Selector: requested model first, then fallbacks in order (bounded 8).
+    const pool = [requested, ...fallbacks].filter(Boolean).slice(0, 8);
+    if (pool.length === 0) return null;
+    return pool[Math.min(idx ?? 0, pool.length - 1)];
+  }
+
   function start({ runId, task, objective, artifacts = [], model, dir, bin, auto = false } = {}) {
     if (!task?.id) throw new Error('task id is required');
     const id = workerId();
     const role = task.agent ?? 'orchestrator';
+    const resolved = nextModel(model ?? options.model, workers.size);
     const record = {
-      workerId: id, runId: runId ?? null, taskId: task.id, role, model: model ?? null,
+      workerId: id, runId: runId ?? null, taskId: task.id, role, model: resolved ?? null,
       dir: dir ?? process.cwd(), sessionId: null, pid: null,
       state: 'queued', startedAt: Date.now(), finishedAt: null,
       output: '', error: null, handle: null,
@@ -49,7 +58,7 @@ export function createWorkerManager(options = {}) {
     const handle = launchRun({
       task: prompt,
       agent: role,
-      model,
+      model: resolved,
       dir: record.dir,
       bin,
       auto,

@@ -46,6 +46,7 @@ Flags:
   --new / --fresh        task mode: ignore the persisted session and start brand-new
   --dir <path>           prefer sessions in this directory; task cwd
   --model <model#var>    forwarded to opencode run as -m
+  --fallback-models <csv> comma-separated fallback models tried in order on quota/no-route (bounded, env FACTORY_FALLBACK_MODELS)
   --auto                 auto-approve opencode ask permissions via --auto (explicit opt-in for trusted unattended only; deny stays enforced)
   --no-auto              do not pass --auto (default); ask rules are auto-rejected headlessly (surfaced as ⚠, never silent success)
   --parallel             run tasks in parallel (scheduler + independent workers; default concurrency 3)
@@ -104,7 +105,11 @@ export function parseArgs(argv) {
     version: false,
     nolimit: null,
     resume: null,
+    fallbackModels: [],
   };
+  // Env fallback selector (comma-separated, no spaces needed).
+  const envFallback = process.env.FACTORY_FALLBACK_MODELS;
+  if (envFallback) options.fallbackModels = parseModelList(envFallback);
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -138,6 +143,9 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--model') {
       options.model = requireValue(argv, index, arg);
+      index += 1;
+    } else if (arg === '--fallback-models') {
+      options.fallbackModels = parseModelList(requireValue(argv, index, arg));
       index += 1;
     } else if (arg === '--opencode') {
       options.opencode = requireValue(argv, index, arg);
@@ -194,6 +202,15 @@ function parsePositiveInt(value, flag, minimum) {
   const parsed = Number.parseInt(value, 10);
   if (parsed < minimum) throw new Error(`${flag} must be at least ${minimum}`);
   return parsed;
+}
+
+/** Split a comma-separated fallback list into clean model ids. */
+export function parseModelList(csv) {
+  return String(csv ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 8); // bounded — never more than 8 fallbacks
 }
 
 function terminalSize() {
@@ -733,6 +750,7 @@ async function runTui(mode, options) {
       handle = launchRun({
         task,
         model: options.model,
+        fallbackModels: options.fallbackModels ?? [],
         auto: options.auto,
         dir: options.dir,
         bin: options.opencode,

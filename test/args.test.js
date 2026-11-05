@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs } from '../src/main.js';
+import { parseArgs, parseModelList } from '../src/main.js';
 
 test('parseArgs handles the task-mode flags', () => {
   const options = parseArgs([
@@ -78,4 +78,11 @@ test('parseArgs supports --parallel/--workers/--sequential', () => {
   assert.equal(parseArgs(['--resume', '/tmp/x']).resume, '/tmp/x');
   assert.throws(() => parseArgs(['--workers']), /Missing value for --workers/);
   assert.throws(() => parseArgs(['--resume']), /Missing value for --resume/);
+});
+
+test('parseArgs fallback selector parses CSV (bounded 8)', () => {
+  assert.deepEqual(parseModelList('opencode/a, opencode/b,,opencode/c'), ['opencode/a', 'opencode/b', 'opencode/c']);
+  assert.deepEqual(parseArgs(['--fallback-models', 'a,b']).fallbackModels, ['a', 'b']);
+  assert.deepEqual(parseArgs(['--fallback-models', 'x']).fallbackModels, ['x']);
+  assert.equal(parseModelList(Array.from({ length: 20 }, (_, i) => `m${i}`).join(',')).length, 8);
 });

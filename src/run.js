@@ -400,3 +400,47 @@ export function launchRun(options = {}) {
   };
   return handle;
 }
+
+/**
+ * True for provider-quota / transient failures that justify trying another model.
+ * Note: free models share one account quota — retrying another free model will
+ * 429 until reset, but still tries (bounded). `no-route` (unsupported package/
+ * variant) retries a different model too.
+ */
+export function isTransientProviderError(text) {
+  return /provider\.quota|free usage limit|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout/i.test(String(text ?? ''));
+}
+
+/**
+ * Launch `opencode run`, retrying quota/no-route failures with the next model
+ * in `fallbackModels` (bounded, backoff). Returns { handle, done } like launchRun
+ * but `done` resolves only after the final attempt. Events carry the model in meta.
+ * Falls back only on transient errors; other failures resolve immediately.
+ */
+export async function launchRunWithFallback(options = {}) {
+  const models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
+  const maxRetries = Math.min(3, options.fallbackRetries ?? Math.max(0, models.length - 1));
+  const backoff = (n) => new Promise((r) => setTimeout(r, Math.min(2000, 250 * 2 ** n)));
+  let model = options.model;
+  let attemptError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const handle = launchRun({ ...options, model });
+    const result = await handle.done;
+    const failed =
+      result?.error ||
+      (result?.code !== 0 && isTransientProviderError(`${result?.stderr ?? ''} ${attemptError ?? ''}`)) ||
+      isTransientProviderError(JSON.stringify(result ?? '{}'));
+    // Accumulate any streamed error text via handle replay.
+    let streamedError = '';
+    handle.onEvent((p) => { if (p?.error) streamedError = `${streamedError} ${p.error}`; });
+    if (!failed) return { handle, result, model: model ?? '(default)' };
+    attemptError = streamedError || result?.error?.message || result?.stderr || 'transient failure';
+    if (!isTransientProviderError(attemptError) || attempt >= maxRetries) {
+      return { handle, result, model: model ?? '(default)', exhausted: true };
+    }
+    model = models[(attempt + 1) % Math.max(1, models.length)] ?? model;
+    if (model == null) break;
+    await backoff(attempt);
+  }
+  return { handle: null, result: null, model: model ?? '(default)', exhausted: true };
+}

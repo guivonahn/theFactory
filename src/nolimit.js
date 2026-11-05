@@ -74,12 +74,21 @@ function processIsRunning(pid) {
 }
 
 function apiKey() {
-  try {
-    const keys = JSON.parse(readFileSync(KEYS_FILE, 'utf8'));
-    return Object.values(keys)[0] || null;
-  } catch {
-    return null;
+  // Proxy may run from the parent checkout (vendor/ + data/ only exist there).
+  // Try worktree-local keys first, then the parent repo's keys.
+  const candidates = [
+    KEYS_FILE,
+    join(PROJECT_DIR, '..', 'vendor', 'opencode-nolimit', 'data', 'keys.json'),
+    join(PROJECT_DIR, '..', '..', 'vendor', 'opencode-nolimit', 'data', 'keys.json'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const keys = JSON.parse(readFileSync(candidate, 'utf8'));
+      const value = Object.values(keys)[0];
+      if (value) return value;
+    } catch {}
   }
+  return null;
 }
 
 function configureOpenCode() {
@@ -136,6 +145,18 @@ function configureOpenCode() {
     const entry = { action: 'external_directory', resource: WORKIN_ON, effect: 'allow' };
     if (askIndex >= 0) config.permissions.splice(askIndex + 1, 0, entry);
     else config.permissions.push(entry);
+  }
+  // OC-NOLIMIT models declare no variants; agent models with `#high` fail
+  // with `Variant unavailable`. Strip variants for OC-NOLIMIT agent models only.
+  if (config.agents && typeof config.agents === 'object') {
+    for (const agent of Object.values(config.agents)) {
+      if (typeof agent?.model === 'string' && agent.model.startsWith('OC-NOLIMIT/') && agent.model.includes('#')) {
+        agent.model = agent.model.split('#')[0];
+      }
+    }
+  }
+  if (typeof config.model === 'string' && config.model.startsWith('OC-NOLIMIT/') && config.model.includes('#')) {
+    config.model = config.model.split('#')[0];
   }
   writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
 }
