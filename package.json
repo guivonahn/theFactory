@@ -1,0 +1,24 @@
+{
+  "name": "thefactory",
+  "version": "1.1.0",
+  "description": "Zero-dependency terminal visualizer for an orchestrator agent and its subagents",
+  "type": "module",
+  "bin": {
+    "thefactory": "./bin/theFactory.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "node bin/theFactory.js --demo",
+    "snapshot": "node bin/theFactory.js --snapshot --demo",
+    "test": "node --test test/",
+    "task": "node bin/theFactory.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT"
+}
