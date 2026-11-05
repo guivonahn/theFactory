@@ -3,6 +3,8 @@
  * Coordinates are zero-based; ANSI output is converted to one-based rows/cols.
  */
 
+import { fgCode, supportsTruecolor } from './colors.js';
+
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OSC_PATTERN = /\x1b\][^\u0007]*(?:\u0007|\x1b\\)/g;
 const PLAIN_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
@@ -173,10 +175,6 @@ function makeBuffer(width, height, sentinel) {
   return { chars, styles };
 }
 
-function styleCode(style) {
-  return style > 0 ? `\x1b[38;5;${style}m` : '\x1b[39m';
-}
-
 export class Canvas {
   /**
    * @param {number} width columns
@@ -185,7 +183,21 @@ export class Canvas {
    */
   constructor(width, height, options = {}) {
     this.color = options.color !== false;
+    this.truecolor = options.truecolor ?? supportsTruecolor();
+    // Cached ANSI code per unique style so flush() doesn't resolve every cell.
+    this._styleCache = new Map();
     this.resize(width, height);
+  }
+
+  /** Cached, truecolor-aware SGR sequence for one style value. */
+  _styleCode(style) {
+    const key = `${typeof style}:${style}:${this.truecolor ? 1 : 0}`;
+    let code = this._styleCache.get(key);
+    if (code === undefined) {
+      code = fgCode(style, { truecolor: this.truecolor });
+      this._styleCache.set(key, code);
+    }
+    return code;
   }
 
   /** Allocate two buffers and force the next flush to paint every cell. */
@@ -214,6 +226,8 @@ export class Canvas {
 
   /** Place one glyph, silently ignoring out-of-bounds writes. */
   put(row, col, glyph, style = 0) {
+    // Hex-string styles ('#RRGGBB') must survive verbatim; numbers stay numbers.
+    const normStyle = typeof style === 'string' ? style : (style | 0);
     if (row < 0 || row >= this.height || col < 0 || col >= this.width) return;
     const buffer = this._buffers[this._back];
     let char = Array.from(stripAnsi(glyph))[0] ?? ' ';
@@ -234,10 +248,10 @@ export class Canvas {
       buffer.styles[row][col + 1] = 0;
     }
     buffer.chars[row][col] = char;
-    buffer.styles[row][col] = style | 0;
+    buffer.styles[row][col] = normStyle;
     if (cells === 2) {
       buffer.chars[row][col + 1] = CONTINUATION;
-      buffer.styles[row][col + 1] = style | 0;
+      buffer.styles[row][col + 1] = normStyle;
     }
   }
 
@@ -310,7 +324,7 @@ export class Canvas {
           if (same) break;
           const style = back.styles[row][col];
           if (this.color && style !== activeStyle) {
-            chunks.push(styleCode(style));
+            chunks.push(this._styleCode(style));
             activeStyle = style;
           }
           chunks.push(back.chars[row][col]);

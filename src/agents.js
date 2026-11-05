@@ -1,31 +1,34 @@
 /**
  * Static agent registry used by layout, rendering and live-session mapping.
- * Colours are xterm-256 foreground indexes rendered as \x1b[38;5;Nm.
+ * Colours are hex strings from `src/colors.js` (Apple UIKit terminal theme,
+ * truecolor; see `apple_uikit_terminal_cli_design_system.json`).
  */
+
+import { AGENT_COLORS } from './colors.js';
 
 export const ORCHESTRATOR = Object.freeze({
   key: 'orchestrator',
   label: 'ORCHESTRATOR',
-  color: 231,
+  color: AGENT_COLORS.orchestrator,
   glyph: '◆',
   role: 'coordinator',
 });
 
 /** The six pillar agents, ordered as they appear around the orchestrator. */
 export const AGENTS = Object.freeze([
-  Object.freeze({ key: 'explorer', label: 'EXPLORER', color: 51, glyph: '◇', role: 'maps the terrain' }),
-  Object.freeze({ key: 'architect', label: 'ARCHITECT', color: 201, glyph: '▦', role: 'designs the shape' }),
-  Object.freeze({ key: 'developer', label: 'DEVELOPER', color: 46, glyph: '▶', role: 'writes the code' }),
-  Object.freeze({ key: 'reviewer', label: 'REVIEWER', color: 226, glyph: '◉', role: 'challenges the diff' }),
-  Object.freeze({ key: 'security', label: 'SECURITY', color: 196, glyph: '!', role: 'hunts for risk' }),
-  Object.freeze({ key: 'tester', label: 'TESTER', color: 33, glyph: '✓', role: 'proves the behaviour' }),
+  Object.freeze({ key: 'explorer', label: 'EXPLORER', color: AGENT_COLORS.explorer, glyph: '◇', role: 'maps the terrain' }),
+  Object.freeze({ key: 'architect', label: 'ARCHITECT', color: AGENT_COLORS.architect, glyph: '▦', role: 'designs the shape' }),
+  Object.freeze({ key: 'developer', label: 'DEVELOPER', color: AGENT_COLORS.developer, glyph: '▶', role: 'writes the code' }),
+  Object.freeze({ key: 'reviewer', label: 'REVIEWER', color: AGENT_COLORS.reviewer, glyph: '◉', role: 'challenges the diff' }),
+  Object.freeze({ key: 'security', label: 'SECURITY', color: AGENT_COLORS.security, glyph: '!', role: 'hunts for risk' }),
+  Object.freeze({ key: 'tester', label: 'TESTER', color: AGENT_COLORS.tester, glyph: '✓', role: 'proves the behaviour' }),
 ]);
 
 /** Fallback pillar for agents outside the six known roles (e.g. "build"). */
 export const OTHER_AGENT = Object.freeze({
   key: 'other',
   label: 'OTHER',
-  color: 245,
+  color: AGENT_COLORS.other,
   glyph: '?',
   role: 'auxiliary agent',
 });

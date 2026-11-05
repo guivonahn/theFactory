@@ -5,7 +5,11 @@
 
 import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './agents.js';
 import { Canvas, truncate, wrapText } from './canvas.js';
+import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
+
+const T = themeFor('dark'); // terminalThemes.dark tokens (exact JSON hex)
+const GRAY = APPLE_UIKIT.dark.system;
 
 const PACKET_SPEED = 0.018; // cells per millisecond
 const STEP_MS = 16;
@@ -29,10 +33,10 @@ function clean(value) {
 }
 
 function statusGlyph(state, now) {
-  if (state.status === 'done') return { glyph: '✓', color: 46 };
+  if (state.status === 'done') return { glyph: '✓', color: T.success };
   if (state.status === 'working') return { glyph: '●', color: state.def.color };
   const pulse = Math.floor(now / 450) % 2 === 0;
-  return { glyph: '○', color: pulse ? 245 : 240 };
+  return { glyph: '○', color: pulse ? T.textSecondary : T.border };
 }
 
 export class App {
@@ -64,7 +68,7 @@ export class App {
     this.totalTokens = 0;
     this.activity = 'awaiting first task…';
     this.centerFlashUntil = 0;
-    this.centerFlashColor = 231;
+    this.centerFlashColor = T.textPrimary;
     this.centerLog = [];
     this.logView = { open: false, agentKey: 'orchestrator', scroll: 0 };
     this.inputValue = '';
@@ -184,7 +188,7 @@ export class App {
     };
     this.activity = resumed ? 'continuing session…' : 'running task…';
     this.centerFlashUntil = this.now + 300;
-    this.centerFlashColor = 231;
+    this.centerFlashColor = T.textPrimary;
   }
 
   setRunPid(pid) {
@@ -207,15 +211,15 @@ export class App {
     if (state === 'done') {
       const suffix = this.run.detail ? ` · ${truncate(this.run.detail, 56)}` : '';
       this.activity = `✓ task complete in ${Math.max(1, Math.floor(duration / 1000))}s${suffix}`;
-      this.centerFlashColor = 46;
+      this.centerFlashColor = T.success;
       this.centerFlashUntil = this.now + 500;
     } else if (state === 'aborted') {
       this.activity = '■ task aborted';
-      this.centerFlashColor = 244;
+      this.centerFlashColor = T.textSecondary;
       this.centerFlashUntil = this.now + 350;
     } else if (state === 'error') {
       this.activity = `✗ ${truncate(this.run.detail || 'run failed', 70)}`;
-      this.centerFlashColor = 196;
+      this.centerFlashColor = T.error;
       this.centerFlashUntil = this.now + 1200;
     }
   }
@@ -318,7 +322,7 @@ export class App {
         const slot = this._slotFor(target);
         if (!slot) return;
         const state = this.agents.get(target);
-        this._spawn(slot.path, state?.def.color ?? 245, {
+        this._spawn(slot.path, state?.def.color ?? T.textSecondary, {
           agentKey: target,
           dir: 'out',
           delay: index * 55,
@@ -434,7 +438,7 @@ export class App {
         } else if (prev) {
           glyph = prev.row === cell.row ? '─' : '│';
         }
-        this.canvas.put(cell.row, cell.col, glyph, 238);
+        this.canvas.put(cell.row, cell.col, glyph, T.border);
       }
 
       const state = this.agents.get(key);
@@ -459,13 +463,13 @@ export class App {
     if (this.inputMode && this.centerLog.length > 0) {
       const recent = this.centerLog.slice(-3);
       recent.forEach((line, index) => {
-        const style = index === recent.length - 1 ? 252 : 244;
+        const style = index === recent.length - 1 ? T.textPrimary : T.textSecondary;
         this.canvas.write(box.row + 1 + index, box.col + 2, truncate(line, inner - 2), style);
       });
     } else {
       const lines = wrapText(this.activity, inner - 4);
-      this.canvas.write(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, 252);
-      this.canvas.write(box.row + 2, box.col + 2, truncate(lines[1] ?? '', inner - 2), 250);
+      this.canvas.write(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, T.textPrimary);
+      this.canvas.write(box.row + 2, box.col + 2, truncate(lines[1] ?? '', inner - 2), T.textSecondary);
     }
 
     const working = [...this.agents.values()].filter((state) => state.status === 'working').length;
@@ -474,13 +478,13 @@ export class App {
       box.row + 4,
       box.col + 2,
       truncate(`msgs ${this.totalMessages} · tools ${this.totalTools} · ~tok ${this.totalTokens}`, inner - 2),
-      248,
+      GRAY.gray2,
     );
     this.canvas.write(
       box.row + 5,
       box.col + 2,
       truncate(`${spin} ${working}/6 agents working`, inner - 2),
-      working ? 231 : 240,
+      working ? T.textPrimary : T.border,
     );
   }
 
@@ -492,7 +496,7 @@ export class App {
       const box = slot.box;
       const def = state.def;
       const status = statusGlyph(state, this.now);
-      const border = state.flashUntil > this.now ? 231 : state.status === 'idle' ? 240 : def.color;
+      const border = state.flashUntil > this.now ? T.textPrimary : state.status === 'idle' ? T.border : def.color;
       this.canvas.box(box.row, box.col, box.width, box.height, border, def.label);
       const inner = box.width - 2;
       const stamp = { glyph: status.glyph, color: status.color };
@@ -502,13 +506,13 @@ export class App {
         const message = state.messages[index];
         if (!message) {
           if (index === 0 && state.messageCount === 0) {
-            this.canvas.write(box.row + 1, box.col + 2, truncate('waiting for task', inner - 2), 240);
+            this.canvas.write(box.row + 1, box.col + 2, truncate('waiting for task', inner - 2), T.textMuted);
           }
           continue;
         }
         const prefix = message.dir === 'out' ? '»' : '«';
         this.canvas.put(box.row + 1 + index, box.col + 2, prefix, def.color);
-        this.canvas.write(box.row + 1 + index, box.col + 4, truncate(message.text, inner - 4), 252);
+        this.canvas.write(box.row + 1 + index, box.col + 4, truncate(message.text, inner - 4), T.textPrimary);
       }
 
       const sessions = state.sessions > 1 ? ` · ${state.sessions} sess` : '';
@@ -516,7 +520,7 @@ export class App {
         box.row + box.height - 2,
         box.col + 2,
         truncate(`msg:${state.messageCount} tool:${state.toolCount}${sessions}`, inner - 2),
-        244,
+        T.textSecondary,
       );
     }
   }
@@ -539,15 +543,15 @@ export class App {
     this.canvas.fill(row, 0, this.width, 1, ' ', 0);
     const prompt = 'task> ';
     const inner = Math.max(1, this.width - prompt.length - 3);
-    this.canvas.write(row, 1, prompt, this.run.state === 'running' ? 244 : ORCHESTRATOR.color);
+    this.canvas.write(row, 1, prompt, this.run.state === 'running' ? T.textSecondary : ORCHESTRATOR.color);
     const visible =
       this.inputValue.length > inner ? `…${this.inputValue.slice(-(inner - 1))}` : this.inputValue;
-    this.canvas.write(row, 1 + prompt.length, visible, 252);
+    this.canvas.write(row, 1 + prompt.length, visible, T.textPrimary);
     const cursorCol = 1 + prompt.length + visible.length;
     if (!this.inputValue) {
-      this.canvas.write(row, cursorCol + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), 238);
+      this.canvas.write(row, cursorCol + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), T.border);
     }
-    this.canvas.put(row, cursorCol, '▌', 231);
+    this.canvas.put(row, cursorCol, '▌', T.textPrimary);
   }
 
   _drawStatus() {
@@ -558,15 +562,15 @@ export class App {
       ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}`
       : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit`;
     const statusColor = !this.inputMode
-      ? 244
+      ? T.textSecondary
       : this.run.state === 'error'
-        ? 196
+        ? T.error
         : this.run.state === 'done'
-          ? 46
-          : 244;
+          ? T.success
+          : T.textSecondary;
     this.canvas.write(this.layout.statusRow, 1, truncate(prefix, this.width - 2), statusColor);
     const right = `${this.width}×${this.height}`;
-    this.canvas.write(this.layout.statusRow, this.width - right.length - 1, right, 238);
+    this.canvas.write(this.layout.statusRow, this.width - right.length - 1, right, T.border);
     if (this.inputMode) this._drawInput();
   }
 
@@ -584,26 +588,26 @@ export class App {
     const entries = this._logEntries();
     // Clear the overlay so the underlying frame does not bleed through.
     this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
-    this.canvas.box(row, col, boxWidth, boxHeight, 231, `LOG: ${label}`);
+    this.canvas.box(row, col, boxWidth, boxHeight, T.textPrimary, `LOG: ${label}`);
     this.canvas.write(
       row + 1,
       col + 2,
       truncate(`${entries.length} entries · ←/→ agent · ↑/↓ scroll · 1-6 pillars · esc close`, boxWidth - 4),
-      244,
+      T.textSecondary,
     );
     const visibleRows = Math.max(1, boxHeight - 4);
     const lines = this._logLines(visibleRows);
     lines.forEach((line, index) => {
-      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), 252);
+      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), T.textPrimary);
     });
     if (lines.length === 0) {
-      this.canvas.write(row + 2, col + 2, truncate('(no messages yet)', boxWidth - 4), 240);
+      this.canvas.write(row + 2, col + 2, truncate('(no messages yet)', boxWidth - 4), T.textMuted);
     }
     this.canvas.write(
       row + boxHeight - 1,
       col + 2,
       truncate('←/→ agent · ↑/↓ scroll · esc close · 1-6 pillars', boxWidth - 4),
-      231,
+      T.textPrimary,
     );
   }
 
