@@ -91,6 +91,11 @@
       "effect": "allow"
     },
     {
+      "action": "external_directory",
+      "resource": "/Users/guivonahn/Documents/Code/theFactory/workin_on/*",
+      "effect": "allow"
+    },
+    {
       "action": "read",
       "resource": "*.env",
       "effect": "ask"

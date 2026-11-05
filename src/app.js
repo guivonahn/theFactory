@@ -80,6 +80,13 @@ export class App {
       duration: 0,
       detail: '',
     };
+    this.parallel = {
+      enabled: false,
+      workers: [
+        // { workerId, taskId, role, sessionId, state }
+      ],
+      counts: { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 },
+    };
   }
 
   _indexSlots() {
@@ -176,12 +183,13 @@ export class App {
   }
 
   /** Enter the running state for a spawned task. */
-  startRun({ pid = null, sessionID = null, resumed = false } = {}) {
+  startRun({ pid = null, sessionID = null, resumed = false, parallel = null } = {}) {
     this.run = {
       state: 'running',
       pid,
       sessionID,
       resumed: Boolean(resumed),
+      parallel: parallel && typeof parallel === 'object' ? { workers: parallel.workers ?? null } : null,
       startedAt: this.now,
       duration: 0,
       detail: '',
@@ -197,6 +205,22 @@ export class App {
 
   setRunSession(sessionID) {
     if (this.run.state === 'running' && sessionID) this.run.sessionID = sessionID;
+  }
+
+  /** Replace parallel worker panel from real manager counts (no invention). */
+  setParallelWorkers(workers) {
+    this.parallel.enabled = true;
+    this.parallel.workers = Array.isArray(workers) ? workers.slice(0, 12) : [];
+    const counts = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    for (const w of this.parallel.workers) {
+      if (w.state && counts[w.state] !== undefined) counts[w.state] += 1;
+    }
+    this.parallel.counts = counts;
+    return counts;
+  }
+
+  setParallelEnabled(enabled) {
+    this.parallel.enabled = Boolean(enabled);
   }
 
   runElapsedSeconds() {
@@ -225,11 +249,15 @@ export class App {
   }
 
   _runStatusLine() {
+    const panel = this.parallel?.enabled
+      ? ` · workers q${this.parallel.counts.queued} r${this.parallel.counts.running} ✓${this.parallel.counts.completed} ✗${this.parallel.counts.failed}`
+      : '';
     if (this.run.state === 'running') {
       const pid = this.run.pid ?? '…';
       const session = this.run.sessionID ? this.run.sessionID.slice(0, 14) : '…';
       const mode = this.run.resumed ? 'continued' : 'new';
-      return `running: opencode (pid ${pid}) · ${mode} · session ${session} · ${this.runElapsedSeconds()}s`;
+      const par = this.run.parallel?.workers ? ` · parallel/${this.run.parallel.workers}w` : (panel ? ` · parallel` : '');
+      return `running: opencode (pid ${pid}) · ${mode} · session ${session}${par}${panel} · ${this.runElapsedSeconds()}s`;
     }
     if (this.run.state === 'done') return `✓ task complete in ${this.runElapsedSeconds()}s`;
     if (this.run.state === 'aborted') return `■ aborted after ${this.runElapsedSeconds()}s`;
@@ -474,6 +502,13 @@ export class App {
 
     const working = [...this.agents.values()].filter((state) => state.status === 'working').length;
     const spin = ['◐', '◓', '◑', '◒'][Math.floor(this.now / 180) % 4];
+    // Row 3 hosts the real parallel worker list when enabled (inputMode log
+    // uses rows 1-3 for logs, so only draw when not colliding with 3 log lines).
+    if (this.parallel?.enabled && (!this.inputMode || this.centerLog.length < 3)) {
+      const list = (this.parallel.workers ?? []).slice(0, 2).map((w) => `${w.role ?? '?'}:${w.taskId ?? '?'} ${w.state ?? '?'}`).join(' · ');
+      const extra = this.parallel.workers.length > 2 ? ` · +${this.parallel.workers.length - 2}w` : '';
+      this.canvas.write(box.row + 3, box.col + 2, truncate(list ? `workers: ${list}${extra}` : 'workers: none', inner - 2), T.textSecondary);
+    }
     this.canvas.write(
       box.row + 4,
       box.col + 2,
@@ -544,13 +579,20 @@ export class App {
     const prompt = 'task> ';
     const inner = Math.max(1, this.width - prompt.length - 3);
     this.canvas.write(row, 1, prompt, this.run.state === 'running' ? T.textSecondary : ORCHESTRATOR.color);
-    const visible =
-      this.inputValue.length > inner ? `…${this.inputValue.slice(-(inner - 1))}` : this.inputValue;
+    if (!this.inputValue) {
+      this.canvas.write(row, 1 + prompt.length + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), T.border);
+      this.canvas.put(row, 1 + prompt.length, '▌', T.textPrimary);
+      return;
+    }
+    // Multiline prompt: collapsed `[pasted n lines]` preview (like opencode),
+    // full buffer preserved for submit. Viewport = last line.
+    const all = String(this.inputValue).split('\n');
+    const total = all.length;
+    const lastLine = (all[all.length - 1] ?? '').replace(/\r$/, '');
+    const prefix = total > 1 ? `[pasted ${total} lines] ` : '';
+    const visible = truncate(prefix + lastLine, inner);
     this.canvas.write(row, 1 + prompt.length, visible, T.textPrimary);
     const cursorCol = 1 + prompt.length + visible.length;
-    if (!this.inputValue) {
-      this.canvas.write(row, cursorCol + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), T.border);
-    }
     this.canvas.put(row, cursorCol, '▌', T.textPrimary);
   }
 

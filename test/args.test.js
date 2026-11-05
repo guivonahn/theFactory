@@ -59,3 +59,23 @@ test('parseArgs accepts --new/--fresh and task-mode --session', () => {
   const withSession = parseArgs(['--session', 'ses_xyz']);
   assert.equal(withSession.session, 'ses_xyz');
 });
+
+test('parseArgs defaults auto=false and honors --auto/--no-auto (last wins)', () => {
+  assert.equal(parseArgs(['--task']).auto, false);
+  assert.equal(parseArgs(['--task', '--auto']).auto, true);
+  assert.equal(parseArgs(['--task', '--no-auto']).auto, false);
+  assert.equal(parseArgs(['--no-auto', '--auto']).auto, true);
+  assert.equal(parseArgs(['--auto', '--no-auto']).auto, false);
+});
+
+test('parseArgs supports --parallel/--workers/--sequential', () => {
+  assert.equal(parseArgs(['--task']).parallel, false);
+  assert.equal(parseArgs(['--parallel']).parallel, true);
+  assert.equal(parseArgs(['--workers', '5']).workers, 5);
+  assert.equal(parseArgs(['--workers', '5']).parallel, true);
+  assert.equal(parseArgs(['--sequential']).sequential, true);
+  assert.equal(parseArgs(['--sequential']).parallel, false);
+  assert.equal(parseArgs(['--resume', '/tmp/x']).resume, '/tmp/x');
+  assert.throws(() => parseArgs(['--workers']), /Missing value for --workers/);
+  assert.throws(() => parseArgs(['--resume']), /Missing value for --resume/);
+});

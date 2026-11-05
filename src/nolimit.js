@@ -120,6 +120,23 @@ function configureOpenCode() {
   } else {
     allow.effect = 'allow';
   }
+  // Idempotently ensure the narrow workin_on external_directory allow exists
+  // in the live global config (template: config/opencode/opencode.json).
+  // Last-match-wins: insert after `external_directory *:ask` when missing.
+  // Never add a global allow-all or a broad /Users/guivonahn/* rule.
+  config.permissions ??= [];
+  const WORKIN_ON = '/Users/guivonahn/Documents/Code/theFactory/workin_on/*';
+  const hasWorkinOn = config.permissions.some(
+    (perm) => perm.action === 'external_directory' && perm.resource === WORKIN_ON,
+  );
+  if (!hasWorkinOn && config.permissions.length > 0) {
+    const askIndex = config.permissions.findIndex(
+      (perm) => perm.action === 'external_directory' && perm.resource === '*' && perm.effect === 'ask',
+    );
+    const entry = { action: 'external_directory', resource: WORKIN_ON, effect: 'allow' };
+    if (askIndex >= 0) config.permissions.splice(askIndex + 1, 0, entry);
+    else config.permissions.push(entry);
+  }
   writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
 }
 
