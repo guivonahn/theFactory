@@ -68,6 +68,8 @@ Task-mode composer commands (typed instead of a task):
   /new                   forget the current session; next task starts a new one
   /sessions              list recent root sessions (pick one, then /resume <id|#n>)
   /resume <id|#n>        continue that session on the next task
+  /fallback [list]       show/set quota fallback models (comma-separated, max 8; /fallback clear to reset)
+  /models                list free + nolimit models available for fallback
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
@@ -641,6 +643,38 @@ async function runTui(mode, options) {
       lineInput?.reset();
       app.setInputValue('');
       const [command, ...rest] = task.split(/\s+/);
+  // Mutable fallback selector (TUI-editable). Seeded from CLI/env.
+  if (!Array.isArray(options.fallbackModels)) options.fallbackModels = [];
+  if (command === '/fallback') {
+        const token = rest.join(' ').trim();
+        if (!token) {
+          app.addLog(`fallback models: ${options.fallbackModels.join(', ') || '(none — try /models)'}`);
+          app.applyEvent({ kind: 'status', from: 'orchestrator', text: `fallback: ${options.fallbackModels.length} model(s)` });
+          return;
+        }
+        if (token.toLowerCase() === 'clear') {
+          options.fallbackModels = [];
+          app.addLog('fallback models cleared');
+        } else {
+          options.fallbackModels = parseModelList(token);
+          app.addLog(`fallback models set: ${options.fallbackModels.join(', ')}`);
+        }
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: `fallback: ${options.fallbackModels.length} model(s) · next task uses selector` });
+        return;
+      }
+      if (command === '/models') {
+        try {
+          app.addLog('models (run picks in order; * = nolimit):');
+          const { execFileSync } = await import('node:child_process');
+          const out = execFileSync(options.opencode ?? process.env.FACTORY_OPENCODE ?? 'opencode', ['models'], { encoding: 'utf8', timeout: 15000 });
+          const lines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
+          lines.slice(0, 20).forEach((l) => app.addLog(` ${l}`));
+          if (lines.length > 20) app.addLog(` … +${lines.length - 20} more`);
+        } catch (error) {
+          app.addLog(`! models: ${truncate(error?.message ?? String(error), 90)}`);
+        }
+        return;
+      }
       if (command === '/new' || command === '/fresh') {
         currentSessionID = null;
         clearPersistedSession();
@@ -692,7 +726,7 @@ async function runTui(mode, options) {
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: `resume set: ${truncate(currentSessionID, 50)}` });
         return;
       }
-      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume)`);
+      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models)`);
       return;
     }
     lineInput?.reset();
