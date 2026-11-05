@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -7,6 +7,7 @@ import {
   unlinkSync,
   openSync,
   closeSync,
+  chmodSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -89,6 +90,8 @@ function configureOpenCode() {
     : join(homedir(), '.config', 'opencode');
   const configFile = join(configDir, 'opencode.json');
   if (!existsSync(configFile)) return;
+  const configMode = existsSync(configFile) ? 0o600 : 0o600;
+  chmodSync(configFile, configMode);
 
   const config = JSON.parse(readFileSync(configFile, 'utf8'));
   config.provider ??= {};
@@ -120,23 +123,8 @@ function configureOpenCode() {
   writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
 }
 
-async function installDependencies() {
-  let bun = bunBinary();
-  if (!bun) {
-    const installer = spawnSync(
-      'bash',
-      ['-c', 'curl -fsSL https://bun.sh/install | bash'],
-      { stdio: 'inherit' },
-    );
-    if (installer.status !== 0) return false;
-    bun = join(homedir(), '.bun', 'bin', 'bun');
-  }
-  if (!existsSync(bun)) return false;
-  if (!opencodeBinary()) {
-    const installer = spawnSync(bun, ['add', '-g', 'opencode-ai'], { stdio: 'inherit' });
-    if (installer.status !== 0) return false;
-  }
-  return true;
+async function dependenciesReady() {
+  return Boolean(bunBinary() && opencodeBinary());
 }
 
 export async function ensureNolimit() {
@@ -144,8 +132,11 @@ export async function ensureNolimit() {
     configureOpenCode();
     return { ok: true };
   }
-  if (!await installDependencies()) {
-    return { ok: false, error: 'could not install Bun or the OpenCode CLI for opencode-nolimit' };
+  if (!await dependenciesReady()) {
+    return {
+      ok: false,
+      error: 'Bun and the OpenCode CLI are required; install them explicitly and run the task again',
+    };
   }
 
   const bun = bunBinary();
@@ -183,34 +174,9 @@ export async function ensureNolimit() {
 }
 
 export async function nolimitCommand(action = 'status') {
-  if (!['install', 'start', 'stop', 'restart', 'status', 'key', 'models'].includes(action)) {
+  if (!['start', 'stop', 'restart', 'status', 'key', 'models'].includes(action)) {
     process.stderr.write(`Unknown nolimit action: ${action}\n`);
     return 1;
-  }
-
-  if (action === 'install') {
-    let bun = bunBinary();
-    if (!bun) {
-      process.stdout.write('Installing Bun...\n');
-      const installer = spawnSync(
-        'bash',
-        ['-c', 'curl -fsSL https://bun.sh/install | bash'],
-        { stdio: 'inherit', env: { ...process.env } },
-      );
-      if (installer.status !== 0) return 1;
-      bun = join(homedir(), '.bun', 'bin', 'bun');
-    }
-    if (!existsSync(bun)) {
-      process.stderr.write('Bun was installed but was not found at the expected path.\n');
-      return 1;
-    }
-    if (!opencodeBinary()) {
-      process.stdout.write('Installing OpenCode CLI...\n');
-      const opencodeInstall = spawnSync(bun, ['add', '-g', 'opencode-ai'], { stdio: 'inherit' });
-      if (opencodeInstall.status !== 0) return 1;
-    }
-    process.stdout.write('Built-in opencode-nolimit dependencies are ready.\n');
-    return 0;
   }
 
   if (action === 'status') {

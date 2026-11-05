@@ -53,7 +53,9 @@ async function start(): Promise<string> {
       const text = chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk);
       log.push(text);
       const passwordMatch = text.match(/server password ([^\r\n]+)/);
-      if (passwordMatch) serverPassword = passwordMatch[1].trim();
+      if (passwordMatch) {
+        serverPassword = passwordMatch[1].trim();
+      }
       // "opencode server listening on http://127.0.0.1:PORT"
       const m = text.match(/http:\/\/127\.0\.0\.1:(\d+)/);
       if (m && !port) port = Number(m[1]);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { parseRunLine } from '../src/run.js';
+import { parseRunLine, argsForRun } from '../src/run.js';
 
 const fixture = fs
   .readFileSync(new URL('./runLine.fixture.jsonl', import.meta.url), 'utf8')
@@ -42,4 +42,14 @@ test('parseRunLine is tolerant of garbage and maps tool fan-out', () => {
   assert.equal(tool.events[0].kind, 'tool');
   assert.equal(tool.events[0].fanout, true);
   assert.equal(tool.events[0].to, 'explorer');
+});
+
+test('argsForRun passes --session for a continued session', () => {
+  const args = argsForRun({ task: 'hello', sessionID: 'ses_123', model: 'x/y' });
+  assert.deepEqual(args, ['run', '--format', 'json', '--session', 'ses_123', '-m', 'x/y', 'hello']);
+});
+
+test('argsForRun defaults to a brand-new session and supports --continue', () => {
+  assert.deepEqual(argsForRun({ task: 'hello' }), ['run', '--format', 'json', 'hello']);
+  assert.deepEqual(argsForRun({ task: 'hello', continue: true }), ['run', '--format', 'json', '--continue', 'hello']);
 });

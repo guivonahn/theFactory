@@ -80,6 +80,8 @@ the generated local API key to `~/.config/opencode/opencode.json` as the
 thefactory
 thefactory --model openai/gpt-5#high
 thefactory --opencode /path/to/opencode --dir /path/to/project
+thefactory --session <id-or-slug>          # continue that session
+thefactory --new                           # ignore the persisted session
 ```
 
 Bare `thefactory` in a TTY opens the visualizer with a `task> ` composer at the
@@ -101,11 +103,55 @@ Keys in task mode:
 | Esc | abort the active run with `SIGTERM` (the OpenCode session is kept) |
 | Ctrl-C | quit immediately |
 | `q` | quit only when the composer is empty |
+| `l` (empty composer only) | open the log viewer |
 
 `--model` is forwarded as `-m`; `--opencode` (or `FACTORY_OPENCODE`) overrides
 the binary; `--dir` is the child process working directory. A missing binary
 shows `opencode binary not found — set FACTORY_OPENCODE or install opencode`
 and returns to the prompt. Task-mode snapshots are intentionally not supported.
+
+#### Session persistence
+
+Task mode keeps context across tasks **within one process run**: the first task
+creates a new session and its `sessionID` is stored, so later tasks pass
+`--session <id>` to `opencode run` instead of starting over. The id is also
+written to `$XDG_STATE_HOME/thefactory/session.json`
+(or `~/.local/state/thefactory/session.json`) as `{ sessionID, dir, updatedAt }`,
+so the next `thefactory` invocation in the same directory resumes it. A persisted
+id that points at a different directory is ignored. The status line shows whether
+the current run is `new` or `continued` and the session id prefix.
+
+Flags:
+
+| Flag | Task-mode semantics |
+| --- | --- |
+| `--session <id\|slug>` (or `--attach`) | Continue that session (passed to `opencode run` as `--session`) and persist it. |
+| `--new` / `--fresh` | Ignore the persisted session; the next task starts a brand-new one. |
+
+Composer commands (typed in place of a task, they never spawn `opencode run`):
+
+| Command | Action |
+| --- | --- |
+| `/new` (or `/fresh`) | Forget the current session and delete the persisted id. |
+| `/sessions` | List up to 12 recent root sessions in the centre log (`*current*` marks the active one). |
+| `/resume <id\|#n>` | Set the session the next task will continue. `#n` refers to the latest `/sessions` listing. |
+
+#### Log viewer
+
+Press `l` (in task mode only when the composer is empty, so a task containing
+`l` still types) to open a full per-agent log overlay. Every message, tool and
+status event is kept in a capped (500-entry) per-agent history; the overlay shows
+it one agent at a time, on top of a cleared background box.
+
+| Key | Action (log open) |
+| --- | --- |
+| `←` / `→` | cycle agent (orchestrator → explorer → architect → developer → reviewer → security → tester → other) |
+| `↑` / `↓` | scroll back / forward |
+| `1`–`6` | jump straight to explorer / architect / developer / reviewer / security / tester |
+| `Esc` or `q` | close the overlay (does **not** abort a running task) |
+
+The orchestrator log shows the centre log plus the current activity line.
+Pressing `Esc` while the overlay is closed aborts a running task as before.
 
 ### Demo
 

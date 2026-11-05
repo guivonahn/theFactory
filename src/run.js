@@ -97,6 +97,22 @@ export function parseRunLine(line) {
 }
 
 /**
+ * Build the `opencode run` argv for the given options.
+ * Session handling: `sessionID` → `--session <id>`; `continue` (without an id)
+ * → `--continue`; `fresh`/`newSession` → neither (brand-new session).
+ * With no session options the default is a brand-new session (backward compatible).
+ */
+export function argsForRun(options = {}) {
+  const task = String(options.task ?? '');
+  const args = ['run', '--format', 'json'];
+  if (options.sessionID) args.push('--session', options.sessionID);
+  else if (options.continue) args.push('--continue');
+  if (options.model) args.push('-m', options.model);
+  args.push(task);
+  return args;
+}
+
+/**
  * Launch one real OpenCode turn.
  * Returns `{ child, done, onEvent(), sessionID(), stderrTail, kill() }`.
  * Events are delivered through callbacks so the caller never blocks the render
@@ -104,11 +120,8 @@ export function parseRunLine(line) {
  * parsed so far. `bin`/`opencode` both override the binary.
  */
 export function launchRun(options = {}) {
-  const task = String(options.task ?? '');
   const command = options.bin || options.opencode || process.env.FACTORY_OPENCODE || 'opencode';
-  const args = ['run', '--format', 'json'];
-  if (options.model) args.push('-m', options.model);
-  args.push(task);
+  const args = argsForRun(options);
 
   const child = spawn(command, args, {
     cwd: options.dir || process.cwd(),

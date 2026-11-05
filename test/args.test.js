@@ -49,3 +49,13 @@ test('parseArgs rejects missing and invalid flag values', () => {
   assert.throws(() => parseArgs(['--limit', 'abc']), /--limit expects a positive integer/);
   assert.throws(() => parseArgs(['--packet-speed', '5']), /--packet-speed must be at least 20/);
 });
+test('parseArgs accepts --new/--fresh and task-mode --session', () => {
+  const fresh = parseArgs(['--task', '--new']);
+  assert.equal(fresh.fresh, true);
+  const fresh2 = parseArgs(['--task', '--fresh']);
+  assert.equal(fresh2.fresh, true);
+  const noFresh = parseArgs(['--task']);
+  assert.equal(noFresh.fresh, false);
+  const withSession = parseArgs(['--session', 'ses_xyz']);
+  assert.equal(withSession.session, 'ses_xyz');
+});

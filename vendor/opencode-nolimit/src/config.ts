@@ -7,8 +7,8 @@ import { join } from "node:path";
 export const config = {
   /** Public HTTP port of this proxy. */
   port: Number(process.env.PROXY_PORT || 6446),
-  /** Bind address. 0.0.0.0 lets other devices on the LAN reach the proxy. */
-  host: process.env.PROXY_HOST || "0.0.0.0",
+  /** Keep the proxy local unless the user explicitly overrides it. */
+  host: process.env.PROXY_HOST || "127.0.0.1",
 
   /** Internal port for the managed `opencode serve` backend. */
   backendPort: Number(process.env.OPENCODE_PORT || 0),

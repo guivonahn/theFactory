@@ -55,18 +55,21 @@ export interface SendOptions {
 function promptParts(parts: SendOptions["parts"]) {
   return parts.map((part) => ({
     type: part.type,
-    id: crypto.randomUUID(),
     text: part.text,
-    synthetic: false,
-    ignored: false,
   }));
 }
 
-export async function createSession(title = "opencode-nolimit"): Promise<SessionInfo> {
+export async function createSession(
+  title = "opencode-nolimit",
+  model?: BackendModel,
+): Promise<SessionInfo> {
   const res = await fetch(`${baseUrl()}/api/session`, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({
+      title,
+      ...(model ? { model: { providerID: model.providerID, id: model.modelID } } : {}),
+    }),
   });
   if (!res.ok) throw new Error(`createSession failed: HTTP ${res.status} ${await res.text()}`);
   const created = await res.json() as SessionInfo & { sessionID?: string; sessionId?: string; data?: SessionInfo };
@@ -87,18 +90,16 @@ export async function deleteSession(sessionID: string): Promise<void> {
 /** Send a message and wait for the final (non-streamed) result. */
 export async function sendMessage(sessionID: string, opts: SendOptions, signal?: AbortSignal): Promise<MessageResult> {
   const body = {
-    model: { providerID: opts.model.providerID, modelID: opts.model.modelID },
-    parts: promptParts(opts.parts),
-    ...(opts.agent ? { agent: opts.agent } : {}),
+    text: promptParts(opts.parts).map((part) => part.text ?? "").join("\n"),
   };
-  let res = await fetch(`${baseUrl()}/api/session/${sessionID}/prompt`, {
+  let res = await fetch(`${baseUrl()}/api/session/${sessionID}/message`, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     signal,
   });
   if (res.status === 404) {
-    res = await fetch(`${baseUrl()}/api/session/${sessionID}/message`, {
+    res = await fetch(`${baseUrl()}/api/session/${sessionID}/prompt`, {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
@@ -120,7 +121,34 @@ export async function sendMessage(sessionID: string, opts: SendOptions, signal?:
   if (res.status === 204) {
     return { info: { id: "", role: "assistant", finish: "stop" }, parts: [] };
   }
-  return (await res.json()) as MessageResult;
+  const payload = await res.json() as { data?: unknown };
+  if (payload && typeof payload === "object" && payload.data && "parts" in payload) {
+    return payload.data as MessageResult;
+  }
+
+  // Current OpenCode prompt calls durably admit work instead of returning the
+  // completed assistant message. Poll the session transcript until it finishes.
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    await Bun.sleep(250);
+    const messages = await fetch(`${baseUrl()}/api/session/${sessionID}/message?limit=20`, {
+      headers: apiHeaders(),
+      signal,
+    });
+    if (!messages.ok) continue;
+    const listed = await messages.json() as { data?: any[] };
+    const rows = Array.isArray(listed) ? listed : listed.data ?? [];
+    console.log(`[ocapi] transcript=${JSON.stringify(rows.slice(-2))}`);
+    const assistant = [...rows].reverse().find((row) =>
+      (row.info?.role === "assistant" || row.role === "assistant") &&
+      (row.info?.finish === "stop" || row.info?.finish === "length" || row.finish === "stop" || row.finish === "length")
+    );
+    if (assistant) return {
+      info: assistant.info ?? { id: assistant.id ?? "", role: "assistant", finish: assistant.finish ?? "stop" },
+      parts: assistant.parts ?? [],
+    };
+  }
+  throw new Error(`Timed out waiting for OpenCode response in session ${sessionID}`);
 }
 
 export interface StreamEvent {

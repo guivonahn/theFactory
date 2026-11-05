@@ -52,17 +52,15 @@ const server = Bun.serve({
         modelsMeta: modelsMeta(),
       });
     }
-    // Keys are readable on the dashboard without auth; rotating them does need a valid key.
-    if (path === "/api/keys") {
-      return json({ keys: allKeys() });
-    }
-
     // ── Model / chat routes require a valid API key ──────────────────
     const user = authenticate(req);
     if (!user) {
       return json({ error: { message: "Invalid API key", type: "authentication_error" } }, 401);
     }
     // ── Key management (rotate requires a valid key) ─────────────────
+    if (path === "/api/keys" && req.method === "GET") {
+      return json({ keys: allKeys() });
+    }
     if (path === "/api/keys/rotate" && req.method === "POST") {
       return json({ keys: rotateKeys() });
     }

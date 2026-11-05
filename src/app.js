@@ -14,6 +14,7 @@ function freshAgent(def) {
   return {
     def,
     messages: [],
+    history: [],
     messageCount: 0,
     toolCount: 0,
     sessions: 1,
@@ -65,6 +66,7 @@ export class App {
     this.centerFlashUntil = 0;
     this.centerFlashColor = 231;
     this.centerLog = [];
+    this.logView = { open: false, agentKey: 'orchestrator', scroll: 0 };
     this.inputValue = '';
     this.run = {
       state: 'idle',
@@ -112,22 +114,75 @@ export class App {
     if (this.centerLog.length > 20) this.centerLog.shift();
   }
 
+  /** Open the per-agent log overlay for the given agent key. */
+  openLog(agentKey = 'orchestrator') {
+    const key = agentKey === 'orchestrator' ? 'orchestrator' : this._agentKey(agentKey);
+    this.logView.open = true;
+    this.logView.agentKey = key;
+    this.logView.scroll = 0;
+  }
+
+  /** Close the log overlay. */
+  closeLog() {
+    this.logView.open = false;
+  }
+
+  /** Cycle through orchestrator + 6 pillars + other. dir is ±1. */
+  cycleLogAgent(dir) {
+    const order = ['orchestrator', ...AGENT_ORDER, 'other'];
+    let index = order.indexOf(this.logView.agentKey);
+    if (index < 0) index = 0;
+    const next = (index + (dir < 0 ? -1 : 1) + order.length) % order.length;
+    this.logView.agentKey = order[next];
+    this.logView.scroll = 0;
+  }
+
+  /** Scroll the log overlay by delta lines (negative = toward the bottom). */
+  scrollLog(delta) {
+    // scroll = how many entries up from the newest (0 shows latest at bottom).
+    this.logView.scroll = Math.max(0, (this.logView.scroll | 0) - Math.trunc(delta));
+  }
+
+  /** Entries for the selected log-view agent (orchestrator uses centerLog). */
+  _logEntries() {
+    const key = this.logView.agentKey;
+    if (key === 'orchestrator') {
+      const entries = [...this.centerLog];
+      if (this.activity) entries.push(this.activity);
+      return entries;
+    }
+    const state = this.agents.get(key);
+    return state ? state.history.map((entry) => `${entry.dir} ${entry.text}`) : [];
+  }
+
+  /** Visible log lines for the overlay (shared by _drawLog and tests). */
+  _logLines(visibleRows) {
+    const entries = this._logEntries();
+    const maxScroll = Math.max(0, entries.length - Math.max(1, visibleRows));
+    const scroll = Math.min(this.logView.scroll, maxScroll);
+    this.logView.scroll = scroll;
+    const end = entries.length - scroll;
+    const start = Math.max(0, end - Math.max(1, visibleRows));
+    return entries.slice(start, end);
+  }
+
   /** Set the current composer value; the block cursor always sits at the end. */
   setInputValue(value) {
     this.inputValue = String(value ?? '');
   }
 
   /** Enter the running state for a spawned task. */
-  startRun({ pid = null, sessionID = null } = {}) {
+  startRun({ pid = null, sessionID = null, resumed = false } = {}) {
     this.run = {
       state: 'running',
       pid,
       sessionID,
+      resumed: Boolean(resumed),
       startedAt: this.now,
       duration: 0,
       detail: '',
     };
-    this.activity = 'running task…';
+    this.activity = resumed ? 'continuing session…' : 'running task…';
     this.centerFlashUntil = this.now + 300;
     this.centerFlashColor = 231;
   }
@@ -169,12 +224,14 @@ export class App {
     if (this.run.state === 'running') {
       const pid = this.run.pid ?? '…';
       const session = this.run.sessionID ? this.run.sessionID.slice(0, 14) : '…';
-      return `running: opencode (pid ${pid}) · ${session} · ${this.runElapsedSeconds()}s`;
+      const mode = this.run.resumed ? 'continued' : 'new';
+      return `running: opencode (pid ${pid}) · ${mode} · session ${session} · ${this.runElapsedSeconds()}s`;
     }
     if (this.run.state === 'done') return `✓ task complete in ${this.runElapsedSeconds()}s`;
     if (this.run.state === 'aborted') return `■ aborted after ${this.runElapsedSeconds()}s`;
     if (this.run.state === 'error') return `✗ ${truncate(this.run.detail || 'run failed', 44)}`;
-    return 'ready · type a task';
+    const session = this.run.sessionID ? ` · session ${this.run.sessionID.slice(0, 12)}` : '';
+    return `ready · type a task${session}`;
   }
 
   _agentKey(name) {
@@ -189,6 +246,13 @@ export class App {
     state.messages.push({ dir, text });
     if (state.messages.length > 2) state.messages.shift();
     state.messageCount += 1;
+  }
+
+  /** Append one entry to an agent's full history (cap 500). */
+  _pushHistory(state, entry) {
+    if (!state) return;
+    state.history.push(entry);
+    if (state.history.length > 500) state.history.shift();
   }
 
   _spawn(path, color, options = {}) {
@@ -227,6 +291,7 @@ export class App {
     if (!text) return;
 
     this._addMessage(state, dir, text);
+    this._pushHistory(state, { dir, text, kind: 'msg', at: this.now });
     this.totalMessages += 1;
     this.totalTokens += Math.max(1, Math.ceil(text.length / 4));
     state.status = 'working';
@@ -271,6 +336,7 @@ export class App {
     state.pulseUntil = this.now + 1000;
     this.totalTools += 1;
     const detail = clean(event.text);
+    this._pushHistory(state, { dir: 'tool', text: detail || 'running tool', kind: 'tool', at: this.now });
     this.activity = `${state.def.label.toLowerCase()}: ${detail || 'running tool'}`;
 
     const slot = this._slotFor(key);
@@ -293,12 +359,14 @@ export class App {
     if (event.from === ORCHESTRATOR.key || !event.from) {
       if (text) this.activity = text;
       this.centerFlashUntil = this.now + 180;
+      if (text) this.addLog(text);
       return;
     }
     const key = this._agentKey(event.from);
     const state = this.agents.get(key);
     if (!state) return;
     if (key === 'other') this.showOther = true;
+    if (text) this._pushHistory(state, { dir: 'status', text, kind: 'status', at: this.now });
     const lowered = text.toLowerCase();
     if (lowered.includes('done') || lowered.includes('complete') || lowered.includes('finish') || event.state === 'done') {
       state.status = 'done';
@@ -483,8 +551,11 @@ export class App {
   }
 
   _drawStatus() {
+    const idleTaskHint = this.run.state === 'running'
+      ? ' · esc abort'
+      : ' · /sessions pick · /new fresh · l log';
     const prefix = this.inputMode
-      ? `theFactory · task · ${this._runStatusLine()}${this.run.state === 'running' ? ' · esc abort' : ''}`
+      ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}`
       : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit`;
     const statusColor = !this.inputMode
       ? 244
@@ -499,6 +570,43 @@ export class App {
     if (this.inputMode) this._drawInput();
   }
 
+  /** Paint the log overlay on top of everything (only when open). */
+  _drawLog() {
+    if (!this.logView.open) return;
+    const boxWidth = Math.max(24, Math.min(this.width - 4, Math.floor(this.width * 0.7)));
+    const boxHeight = Math.max(8, Math.min(this.height - 4, Math.floor(this.height * 0.7)));
+    const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
+    const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
+    const key = this.logView.agentKey;
+    const label = key === 'orchestrator'
+      ? ORCHESTRATOR.label
+      : (this.agents.get(key)?.def.label ?? key.toUpperCase());
+    const entries = this._logEntries();
+    // Clear the overlay so the underlying frame does not bleed through.
+    this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
+    this.canvas.box(row, col, boxWidth, boxHeight, 231, `LOG: ${label}`);
+    this.canvas.write(
+      row + 1,
+      col + 2,
+      truncate(`${entries.length} entries · ←/→ agent · ↑/↓ scroll · 1-6 pillars · esc close`, boxWidth - 4),
+      244,
+    );
+    const visibleRows = Math.max(1, boxHeight - 4);
+    const lines = this._logLines(visibleRows);
+    lines.forEach((line, index) => {
+      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), 252);
+    });
+    if (lines.length === 0) {
+      this.canvas.write(row + 2, col + 2, truncate('(no messages yet)', boxWidth - 4), 240);
+    }
+    this.canvas.write(
+      row + boxHeight - 1,
+      col + 2,
+      truncate('←/→ agent · ↑/↓ scroll · esc close · 1-6 pillars', boxWidth - 4),
+      231,
+    );
+  }
+
   /** Paint the current state into the back buffer. */
   draw() {
     if (this.layout.tooSmall) return;
@@ -508,6 +616,7 @@ export class App {
     this._drawAgents();
     this._drawPackets();
     this._drawStatus();
+    this._drawLog();
   }
 
   /** Paint and return the diffed ANSI frame. */

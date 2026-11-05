@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { config } from "./config";
@@ -45,7 +45,8 @@ function load(): KeyStore {
 
 function persist(keys: KeyStore): void {
   mkdirSync(dirname(config.keysFile), { recursive: true });
-  writeFileSync(config.keysFile, JSON.stringify(keys, null, 2));
+  writeFileSync(config.keysFile, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  chmodSync(config.keysFile, 0o600);
 }
 
 /** Validate a request and return the key label, or null when unauthorized. */

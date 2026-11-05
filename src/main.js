@@ -7,12 +7,18 @@ import process from 'node:process';
 import * as readlinePromises from 'node:readline/promises';
 import { readFileSync } from 'node:fs';
 import { App } from './app.js';
+import { AGENT_ORDER } from './agents.js';
 import { truncate } from './canvas.js';
 import { demoEvents, playDemo } from './demo.js';
 import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
 import { launchRun } from './run.js';
+import {
+  clearPersistedSession,
+  loadPersistedSession,
+  savePersistedSession,
+} from './sessionState.js';
 import { ensureNolimit, nolimitCommand } from './nolimit.js';
 
 const FPS = 12;
@@ -33,8 +39,11 @@ Usage:
   thefactory --list                  list root sessions and exit
 
 Flags:
-  --attach <id|slug>     alias for --session (live mode)
-  --session <id|slug>    select a session by exact id, id prefix, or slug
+  --attach <id|slug>     alias for --session (task and live modes)
+  --session <id|slug>    select/continue a session by exact id, id prefix, or slug
+                         (task mode: pass --session to opencode run + persist it;
+                         live mode: replay/follow that session)
+  --new / --fresh        task mode: ignore the persisted session and start brand-new
   --dir <path>           prefer sessions in this directory; task cwd
   --model <model#var>    forwarded to opencode run as -m
   --opencode <path>      opencode binary (or set FACTORY_OPENCODE)
@@ -48,9 +57,23 @@ Flags:
   --version              print the installed version
   -h, --help             show this help
 
+Task-mode composer commands (typed instead of a task):
+  /new                   forget the current session; next task starts a new one
+  /sessions              list recent root sessions (pick one, then /resume <id|#n>)
+  /resume <id|#n>        continue that session on the next task
+
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
-The visualizer needs at least ${MIN_WIDTH}x${MIN_HEIGHT}.`;
+Keys in all TUI modes: l opens the log viewer (task mode: only when the
+composer is empty, so typing l mid-task still works). In the log viewer:
+←/→ cycle agent (orchestrator + 6 pillars + other), ↑/↓ scroll, 1-6 jump to
+explorer/architect/developer/reviewer/security/tester, Esc closes.
+The visualizer needs at least ${MIN_WIDTH}x${MIN_HEIGHT}.
+
+Session persistence (task mode): the last session id is saved to
+$XDG_STATE_HOME/thefactory/session.json (or ~/.local/state/thefactory/session.json)
+and resumes automatically when the working directory matches. Use --new or /new to
+start fresh.`;
 
 /** Parse the small, dependency-free flag set. */
 export function parseArgs(argv) {
@@ -58,6 +81,7 @@ export function parseArgs(argv) {
     mode: null,
     snapshot: null,
     session: null,
+    fresh: false,
     dir: null,
     limit: 200,
     follow: null,
@@ -78,6 +102,7 @@ export function parseArgs(argv) {
     else if (arg === '--task') options.mode = 'task';
     else if (arg === '--picker') options.mode = 'picker';
     else if (arg === '--list') options.mode = 'list';
+    else if (arg === '--new' || arg === '--fresh') options.fresh = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg === '--version' || arg === '-v') options.version = true;
     else if (arg === 'nolimit') {
@@ -332,6 +357,20 @@ async function runTui(mode, options) {
   let runToken = 0;
   const lineInput = mode === 'task' ? new LineInput(options.task ?? '') : null;
   if (lineInput) app.setInputValue(lineInput.value);
+  // Persistent session: --session wins, --new/--fresh ignores the file,
+  // otherwise resume the persisted id when its dir matches.
+  let currentSessionID = null;
+  if (mode === 'task') {
+    if (options.session) {
+      currentSessionID = options.session;
+    } else if (!options.fresh) {
+      const persisted = loadPersistedSession({ dir: options.dir });
+      if (persisted) currentSessionID = persisted.sessionID;
+    }
+    if (currentSessionID && !options.fresh) {
+      savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+    }
+  }
   let finish;
   const done = new Promise((resolve) => {
     finish = resolve;
@@ -420,6 +459,8 @@ async function runTui(mode, options) {
 
   const handleParsed = (parsed) => {
     if (parsed.sessionID) {
+      currentSessionID = parsed.sessionID;
+      savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
       app.setRunSession(parsed.sessionID);
       attachRoot(parsed.sessionID);
     }
@@ -438,6 +479,10 @@ async function runTui(mode, options) {
       killTimer = null;
     }
     if (stopped) return;
+    if (app.run.sessionID) {
+      currentSessionID = app.run.sessionID;
+      savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+    }
     const elapsed = Math.max(
       0,
       Math.floor((app.run.startedAt ? app.now - app.run.startedAt : 0) / 1000),
@@ -504,6 +549,66 @@ async function runTui(mode, options) {
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'run active · press esc to abort' });
       return;
     }
+    // Slash commands are handled before launching (and before touching the
+    // run lifecycle), so they never spawn `opencode run`.
+    if (task.startsWith('/')) {
+      lineInput?.reset();
+      app.setInputValue('');
+      const [command, ...rest] = task.split(/\s+/);
+      if (command === '/new' || command === '/fresh') {
+        currentSessionID = null;
+        clearPersistedSession();
+        app.addLog('fresh session — next task starts a new session');
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'fresh session — next task starts a new session' });
+        return;
+      }
+      if (command === '/sessions') {
+        try {
+          const sessions = listRootSessions({ dir: options.dir, limit: 12 });
+          if (sessions.length === 0) {
+            app.addLog('no root sessions found');
+          } else {
+            app.addLog('sessions (latest first):');
+            sessions.forEach((session, index) => {
+              const marker = currentSessionID && session.id === currentSessionID ? ' *current*' : '';
+              app.addLog(`${index + 1}. ${truncate(session.id.slice(0, 20), 20)} · ${truncate(session.title || session.slug || '', 60)}${marker}`);
+            });
+            app.addLog('use /resume <id|#n> to continue one');
+          }
+          app.applyEvent({ kind: 'status', from: 'orchestrator', text: `sessions listed (${sessions.length}) · /resume to pick` });
+        } catch (error) {
+          const message = error?.message ?? String(error);
+          app.addLog(`! sessions: ${truncate(message, 90)}`);
+        }
+        return;
+      }
+      if (command === '/resume') {
+        const token = rest.join(' ').trim();
+        if (!token) {
+          app.addLog('! usage: /resume <id|#n>');
+          return;
+        }
+        let nextID = token;
+        if (/^\d+$/.test(token)) {
+          try {
+            const sessions = listRootSessions({ dir: options.dir, limit: 12 });
+            const index = Number.parseInt(token, 10) - 1;
+            if (sessions[index]) nextID = sessions[index].id;
+          } catch (error) {
+            const message = error?.message ?? String(error);
+            app.addLog(`! resume lookup: ${truncate(message, 90)}`);
+            return;
+          }
+        }
+        currentSessionID = nextID;
+        savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+        app.addLog(`resume set: ${truncate(currentSessionID, 60)}`);
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: `resume set: ${truncate(currentSessionID, 50)}` });
+        return;
+      }
+      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume)`);
+      return;
+    }
     lineInput?.reset();
     app.setInputValue('');
     if (pollTimer) {
@@ -520,7 +625,11 @@ async function runTui(mode, options) {
     abortRequested = false;
     runToken += 1;
     const token = runToken;
-    app.startRun({});
+    const resumed = Boolean(currentSessionID);
+    app.startRun({ sessionID: currentSessionID, resumed });
+    if (currentSessionID) {
+      savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+    }
     preparingRun = true;
     app.addLog(`▶ ${truncate(task, 110)}`);
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: `▶ ${truncate(task, 80)}` });
@@ -541,11 +650,15 @@ async function runTui(mode, options) {
         model: options.model,
         dir: options.dir,
         bin: options.opencode,
+        sessionID: currentSessionID,
         onSpawn: (pid) => {
           if (token === runToken && !stopped) app.setRunPid(pid);
         },
         onSessionID: (id) => {
-          if (token === runToken && !stopped) app.setRunSession(id);
+          if (token !== runToken || stopped) return;
+          currentSessionID = id;
+          savePersistedSession({ sessionID: id, dir: options.dir });
+          app.setRunSession(id);
         },
         onEvent: (parsed) => {
           if (token === runToken && !stopped) handleParsed(parsed);
@@ -566,7 +679,27 @@ async function runTui(mode, options) {
   };
 
   const onKey = (buffer) => {
+    const text = buffer.toString('utf8');
+    // Log overlay consumes keys first so Esc never aborts a run from inside it.
+    if (app.logView.open) {
+      if (text === '\x1b' || text === 'q' || text === 'Q') app.closeLog();
+      else if (text === '\x1b[C') app.cycleLogAgent(1);
+      else if (text === '\x1b[D') app.cycleLogAgent(-1);
+      else if (text === '\x1b[A') app.scrollLog(-1);
+      else if (text === '\x1b[B') app.scrollLog(1);
+      else if (text.length === 1 && text >= '1' && text <= '6') {
+        app.openLog(AGENT_ORDER[Number(text) - 1]);
+      }
+      // Anything else is swallowed while the overlay is open.
+      return;
+    }
     if (mode === 'task') {
+      // Bare `l` opens the log only on an empty composer, so typing l
+      // mid-task still types.
+      if ((text === 'l' || text === 'L') && lineInput.value === '') {
+        app.openLog('orchestrator');
+        return;
+      }
       for (const action of lineInput.handle(buffer)) {
         if (action.type === 'quit') {
           stop(0);
@@ -578,8 +711,12 @@ async function runTui(mode, options) {
       app.setInputValue(lineInput.value);
       return;
     }
-    const text = buffer.toString('utf8');
-    if (text.includes('q') || text.includes('\u0003')) stop(0);
+    if (text === 'l' || text === 'L') {
+      app.openLog('orchestrator');
+      return;
+    }
+    if (text.includes('\u0003')) stop(0);
+    else if (text.includes('q')) stop(0);
   };
   const onSigint = () => stop(0);
   const onResize = () => {

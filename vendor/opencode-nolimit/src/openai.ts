@@ -72,7 +72,7 @@ export async function handleChatCompletion(req: Request): Promise<Response> {
 
 async function runSync(backend: { providerID: string; modelID: string }, parts: { type: "text"; text: string }[], attempt: number) {
   // Fresh session per attempt — the original repo's session rotation.
-  const session = await createSession();
+  const session = await createSession("opencode-nolimit", backend);
   try {
     const result = await sendMessage(session.id, { model: backend, parts });
     // Free tier sometimes replies with an empty body when throttled.
@@ -112,7 +112,7 @@ async function streamOne(
   publicModelId: string,
   _attempt: number,
 ): Promise<Response> {
-  const session = await createSession();
+  const session = await createSession("opencode-nolimit", model.backend);
   const controller = new AbortController();
   const eventPromise = streamEvents(controller.signal, session.id);
   const done = sendMessage(session.id, { model: backend, parts }, controller.signal);

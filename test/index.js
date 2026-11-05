@@ -3,3 +3,5 @@
 import './args.test.js';
 import './demo.test.js';
 import './run.test.js';
+import './log.test.js';
+import './sessionState.test.js';

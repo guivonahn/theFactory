@@ -1,6 +1,6 @@
 {
   "name": "thefactory",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Zero-dependency terminal visualizer for an orchestrator agent and its subagents",
   "type": "module",
   "bin": {
