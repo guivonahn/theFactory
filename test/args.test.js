@@ -39,6 +39,11 @@ test('parseArgs accepts positional task text and version', () => {
   assert.equal(parseArgs(['--version']).version, true);
 });
 
+test('parseArgs accepts the built-in nolimit command', () => {
+  assert.equal(parseArgs(['nolimit', 'start']).nolimit, 'start');
+  assert.equal(parseArgs(['nolimit']).nolimit, 'status');
+});
+
 test('parseArgs rejects missing and invalid flag values', () => {
   assert.throws(() => parseArgs(['--model']), /Missing value for --model/);
   assert.throws(() => parseArgs(['--limit', 'abc']), /--limit expects a positive integer/);

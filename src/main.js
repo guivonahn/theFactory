@@ -13,6 +13,7 @@ import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
 import { launchRun } from './run.js';
+import { ensureNolimit, nolimitCommand } from './nolimit.js';
 
 const FPS = 12;
 const { version } = JSON.parse(
@@ -22,6 +23,7 @@ const USAGE = `thefactory — watch an orchestrator talk to its subagents
 
 Usage:
   thefactory                         task mode: type a job, OpenCode runs it live (TTY)
+  thefactory nolimit <action>        manage built-in opencode-nolimit (install|start|stop|restart|status|key|models)
   thefactory "fix the failing tests"  prefill the task composer (TTY)
   thefactory --task                  same explicit task mode
   thefactory --picker                choose a session, then replay/follow it (TTY)
@@ -66,6 +68,7 @@ export function parseArgs(argv) {
     task: null,
     help: false,
     version: false,
+    nolimit: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -77,6 +80,15 @@ export function parseArgs(argv) {
     else if (arg === '--list') options.mode = 'list';
     else if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg === '--version' || arg === '-v') options.version = true;
+    else if (arg === 'nolimit') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        options.nolimit = next;
+        index += 1;
+      } else {
+        options.nolimit = 'status';
+      }
+    }
     else if (arg === '--snapshot') {
       const next = argv[index + 1];
       if (next && /^\d+$/.test(next)) {
@@ -312,6 +324,7 @@ async function runTui(mode, options) {
   let small = false;
   let fatal = null;
   let activeRun = null;
+  let preparingRun = false;
   let abortRequested = false;
   let killTimer = null;
   let attachTimer = null;
@@ -484,10 +497,10 @@ async function runTui(mode, options) {
     }, 2500);
   };
 
-  const startTask = (raw) => {
+  const startTask = async (raw) => {
     const task = String(raw ?? '').trim();
     if (!task) return;
-    if (activeRun) {
+    if (activeRun || preparingRun) {
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'run active · press esc to abort' });
       return;
     }
@@ -508,8 +521,18 @@ async function runTui(mode, options) {
     runToken += 1;
     const token = runToken;
     app.startRun({});
+    preparingRun = true;
     app.addLog(`▶ ${truncate(task, 110)}`);
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: `▶ ${truncate(task, 80)}` });
+    app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'preparing built-in opencode-nolimit…' });
+    const nolimit = await ensureNolimit();
+    preparingRun = false;
+    if (!nolimit.ok) {
+      app.finishRun('error', nolimit.error);
+      app.addLog(`! ${truncate(nolimit.error, 110)}`);
+      return;
+    }
+    if (stopped || token !== runToken) return;
 
     let handle;
     try {
@@ -696,6 +719,7 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(`thefactory ${version}\n`);
     return 0;
   }
+  if (options.nolimit) return nolimitCommand(options.nolimit);
 
   const isTTY = Boolean(process.stdout.isTTY);
   let mode = chooseMode(options, isTTY);

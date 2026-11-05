@@ -54,6 +54,24 @@ npm link
 thefactory
 ```
 
+## Built-in opencode-nolimit
+
+The OpenAI-compatible `opencode-nolimit` proxy is bundled with theFactory, so
+the MAS can use its free OpenCode model pool without installing a second
+repository. Nolimit starts automatically before each Factory task. Bun and
+the OpenCode CLI are installed automatically when missing.
+
+```sh
+thefactory nolimit status
+thefactory nolimit models
+thefactory nolimit key
+```
+
+Task execution launches the bundled proxy, waits for it to become healthy, and adds
+the generated local API key to `~/.config/opencode/opencode.json` as the
+`OC-NOLIMIT` provider. Models can then be selected as
+`OC-NOLIMIT/deepseek-v4-flash-free` or `OC-NOLIMIT/big-pickle`.
+
 ## Modes
 
 ### Task mode

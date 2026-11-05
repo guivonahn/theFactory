@@ -1,0 +1,620 @@
+{
+  "name": "Apple UIKit-Inspired Terminal CLI Design System",
+  "version": "1.0.0",
+  "scope": "CLI and optional keyboard-driven terminal UI only. No web interface.",
+  "paletteProvenance": {
+    "url": "https://github.com/Innei/apple-uikit-colors",
+    "package": "https://github.com/Innei/apple-uikit-colors/tree/main/packages/react-native-uikit-colors",
+    "sourceFile": "https://github.com/Innei/apple-uikit-colors/blob/main/packages/uikit-colors/index.ts",
+    "license": "MIT",
+    "attributionNote": "Original UIKit palette and semantic tokens preserved as reference; terminal theme roles and rules authored as pragmatic adaptations, not official Apple terminal design standards."
+  },
+  "appleUIKitReference": {
+    "light": {
+      "system": {
+        "red": {
+          "hex": "#FF3B30"
+        },
+        "orange": {
+          "hex": "#FF9500"
+        },
+        "yellow": {
+          "hex": "#FFCC00"
+        },
+        "green": {
+          "hex": "#34C759"
+        },
+        "mint": {
+          "hex": "#00C7BE"
+        },
+        "teal": {
+          "hex": "#30B0BE"
+        },
+        "cyan": {
+          "hex": "#32ADC8"
+        },
+        "blue": {
+          "hex": "#007AFF"
+        },
+        "indigo": {
+          "hex": "#5856D6"
+        },
+        "purple": {
+          "hex": "#AF52DE"
+        },
+        "pink": {
+          "hex": "#FF2D55"
+        },
+        "brown": {
+          "hex": "#A2845E"
+        },
+        "gray": {
+          "hex": "#8E8E93"
+        },
+        "gray2": {
+          "hex": "#ACACB2"
+        },
+        "gray3": {
+          "hex": "#C7C7CC"
+        },
+        "gray4": {
+          "hex": "#D1D1D6"
+        },
+        "gray5": {
+          "hex": "#E5E5EA"
+        },
+        "gray6": {
+          "hex": "#F2F2F7"
+        }
+      },
+      "semantic": {
+        "placeholderText": {
+          "hex": "#C7C7CC"
+        },
+        "separator": {
+          "hex": "#545456",
+          "alpha": 0.34
+        },
+        "opaqueSeparator": {
+          "hex": "#C6C6C8"
+        },
+        "nonOpaqueSeparator": {
+          "hex": "#545456",
+          "alpha": 0.34
+        },
+        "link": {
+          "hex": "#007AFF"
+        },
+        "systemBackground": {
+          "hex": "#FFFFFF"
+        },
+        "secondarySystemBackground": {
+          "hex": "#F2F2F7"
+        },
+        "tertiarySystemBackground": {
+          "hex": "#FFFFFF"
+        },
+        "systemGroupedBackground": {
+          "hex": "#F2F2F7"
+        },
+        "secondarySystemGroupedBackground": {
+          "hex": "#FFFFFF"
+        },
+        "tertiarySystemGroupedBackground": {
+          "hex": "#F2F2F7"
+        },
+        "systemFill": {
+          "hex": "#787880",
+          "alpha": 0.2
+        },
+        "secondarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.16
+        },
+        "tertiarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.12
+        },
+        "quaternarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.08
+        },
+        "label": {
+          "hex": "#000000"
+        },
+        "text": {
+          "hex": "#000000"
+        },
+        "secondaryLabel": {
+          "hex": "#3C3C43",
+          "alpha": 0.6
+        },
+        "tertiaryLabel": {
+          "hex": "#3C3C43",
+          "alpha": 0.3
+        },
+        "quaternaryLabel": {
+          "hex": "#3C3C43",
+          "alpha": 0.18
+        }
+      }
+    },
+    "dark": {
+      "system": {
+        "red": {
+          "hex": "#FF453A"
+        },
+        "orange": {
+          "hex": "#FFAF71"
+        },
+        "yellow": {
+          "hex": "#FFD60A"
+        },
+        "green": {
+          "hex": "#30D158"
+        },
+        "mint": {
+          "hex": "#63E6E2"
+        },
+        "teal": {
+          "hex": "#40C8F4"
+        },
+        "cyan": {
+          "hex": "#64D2FF"
+        },
+        "blue": {
+          "hex": "#0A84FF"
+        },
+        "indigo": {
+          "hex": "#5E5CE6"
+        },
+        "purple": {
+          "hex": "#BF5AF2"
+        },
+        "pink": {
+          "hex": "#FF375F"
+        },
+        "brown": {
+          "hex": "#AC8E68"
+        },
+        "gray": {
+          "hex": "#8E8E93"
+        },
+        "gray2": {
+          "hex": "#636366"
+        },
+        "gray3": {
+          "hex": "#48484A"
+        },
+        "gray4": {
+          "hex": "#3A3A3C"
+        },
+        "gray5": {
+          "hex": "#2C2C2E"
+        },
+        "gray6": {
+          "hex": "#1C1C1E"
+        }
+      },
+      "semantic": {
+        "placeholderText": {
+          "hex": "#7A7A7A"
+        },
+        "separator": {
+          "hex": "#545456",
+          "alpha": 0.6
+        },
+        "opaqueSeparator": {
+          "hex": "#38383A"
+        },
+        "nonOpaqueSeparator": {
+          "hex": "#545456",
+          "alpha": 0.6
+        },
+        "link": {
+          "hex": "#0A84FF"
+        },
+        "systemBackground": {
+          "hex": "#000000"
+        },
+        "secondarySystemBackground": {
+          "hex": "#1C1C1E"
+        },
+        "tertiarySystemBackground": {
+          "hex": "#2C2C2E"
+        },
+        "systemGroupedBackground": {
+          "hex": "#000000"
+        },
+        "secondarySystemGroupedBackground": {
+          "hex": "#1C1C1E"
+        },
+        "tertiarySystemGroupedBackground": {
+          "hex": "#2C2C2E"
+        },
+        "systemFill": {
+          "hex": "#787880",
+          "alpha": 0.36
+        },
+        "secondarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.32
+        },
+        "tertiarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.24
+        },
+        "quaternarySystemFill": {
+          "hex": "#787880",
+          "alpha": 0.19
+        },
+        "label": {
+          "hex": "#FFFFFF"
+        },
+        "text": {
+          "hex": "#FFFFFF"
+        },
+        "secondaryLabel": {
+          "hex": "#EBEBF5",
+          "alpha": 0.6
+        },
+        "tertiaryLabel": {
+          "hex": "#EBEBF5",
+          "alpha": 0.3
+        },
+        "quaternaryLabel": {
+          "hex": "#EBEBF5",
+          "alpha": 0.18
+        }
+      }
+    }
+  },
+  "terminalThemes": {
+    "light": {
+      "tokens": {
+        "background": "#FFFFFF",
+        "surface": "#F2F2F7",
+        "surfaceRaised": "#FFFFFF",
+        "textPrimary": "#000000",
+        "textSecondary": "#6E6E72",
+        "textMuted": "#C4C4C7",
+        "textDisabled": "#DCDCDD",
+        "border": "#C6C6C8",
+        "accent": "#006BE0",
+        "success": "#217F39",
+        "warning": "#A25F00",
+        "error": "#DD0C00",
+        "info": "#23788B",
+        "selectionBackground": "#DFEFFF",
+        "selectionForeground": "#000000",
+        "focus": "#006BE0",
+        "command": "#000000",
+        "path": "#A338D9",
+        "value": "#000000",
+        "keyHint": "#6E6E72"
+      },
+      "contrastMinimumAgainstBackgroundAndSurface": {
+        "textPrimary": 18.82,
+        "textSecondary": 4.55,
+        "accent": 4.5,
+        "success": 4.52,
+        "warning": 4.51,
+        "error": 4.56,
+        "info": 4.56,
+        "focus": 4.5,
+        "command": 18.82,
+        "path": 4.56,
+        "value": 18.82,
+        "keyHint": 4.55
+      },
+      "notes": "Semantic text/status hues may be darkened or lightened for legibility in a terminal; the untouched source palette is under appleUIKitReference. Transparent UIKit colors are not directly emitted as ANSI colors."
+    },
+    "dark": {
+      "tokens": {
+        "background": "#000000",
+        "surface": "#1C1C1E",
+        "surfaceRaised": "#2C2C2E",
+        "textPrimary": "#FFFFFF",
+        "textSecondary": "#8D8D93",
+        "textMuted": "#46464A",
+        "textDisabled": "#2A2A2C",
+        "border": "#38383A",
+        "accent": "#0A84FF",
+        "success": "#30D158",
+        "warning": "#FFAF71",
+        "error": "#FF453A",
+        "info": "#64D2FF",
+        "selectionBackground": "#18324B",
+        "selectionForeground": "#FFFFFF",
+        "focus": "#0A84FF",
+        "command": "#FFFFFF",
+        "path": "#BF5AF2",
+        "value": "#FFFFFF",
+        "keyHint": "#8D8D93"
+      },
+      "contrastMinimumAgainstBackgroundAndSurface": {
+        "textPrimary": 17.01,
+        "textSecondary": 5.16,
+        "accent": 4.66,
+        "success": 8.42,
+        "warning": 9.42,
+        "error": 4.99,
+        "info": 9.89,
+        "focus": 4.66,
+        "command": 17.01,
+        "path": 4.83,
+        "value": 17.01,
+        "keyHint": 5.16
+      },
+      "notes": "Semantic text/status hues may be darkened or lightened for legibility in a terminal; the untouched source palette is under appleUIKitReference. Transparent UIKit colors are not directly emitted as ANSI colors."
+    }
+  },
+  "ansiStyleTokens": {
+    "strong": "SGR bold 1 when available; otherwise plain",
+    "secondary": "Prefer semantic textSecondary color; use dim SGR 2 only for noncritical content",
+    "focus": "reverse SGR 7 or selection background plus a visible > marker",
+    "underline": "SGR 4 only for actionable/important short fragments; not decorative",
+    "reset": "SGR 0 after styled output",
+    "plainTextFallback": "No escape codes; print labels and structural whitespace"
+  },
+  "guidelines": {
+    "scope": {
+      "target": "Terminal-only command-line application (CLI); optional full-screen interactive terminal UI (TUI).",
+      "mustUse": [
+        "stdin",
+        "stdout",
+        "stderr",
+        "terminal escape sequences only when supported",
+        "keyboard input for interactive modes"
+      ],
+      "mustNotUse": [
+        "HTML",
+        "CSS",
+        "JavaScript DOM",
+        "browser UI",
+        "React Native UI components",
+        "touch gestures",
+        "hover-only interactions",
+        "web-only affordances"
+      ],
+      "principle": "The CLI must remain usable without color, Unicode box drawing, a mouse, or an interactive terminal."
+    },
+    "designPhilosophy": [
+      "Clarity before decoration. A CLI is an interface for reading, composing, automating, and acting, not a tiny website.",
+      "Progressive disclosure: show the result first, then the next useful action; keep advanced data behind --verbose or --json.",
+      "Use semantic meaning, alignment, concise words, and predictable conventions instead of ornamental borders and large banners.",
+      "Respect system terminal theme and contrast; never force Apple-style white panels or glass effects.",
+      "Optimized for real workflows: pipeability, predictable exit codes, idempotence when possible, and useful diagnostics."
+    ],
+    "typography": {
+      "fontPolicy": "Do not control the terminal font. User chooses terminal font and size. Prefer readable monospace output; Fira Code is optional, not a prerequisite.",
+      "hierarchy": {
+        "primaryTitle": "Short sentence in bold if ANSI is enabled; plain text in non-TTY.",
+        "sectionHeading": "One short heading, separated by a blank line only when helpful.",
+        "body": "Normal intensity; prefer short lines and plain language.",
+        "metadata": "Secondary color or dim, but never make actionable information illegible.",
+        "commands": "Use shell-copyable literals without smart quotes; highlight the executable/flags only if supported.",
+        "numbers": "Align right in tables; use tabular columns; keep units explicit."
+      },
+      "avoid": [
+        "large ASCII-art logos",
+        "excessive uppercase",
+        "multi-line decorative box art",
+        "dense emoji",
+        "font-dependent special ligatures as semantic indicators"
+      ]
+    },
+    "layout": {
+      "measure": "Calculate terminal width at runtime for interactive screens; never assume 80 or 120 columns.",
+      "defaultSpacing": {
+        "sectionBlankLines": 1,
+        "horizontalCellPadding": 2,
+        "tableMinGap": 2,
+        "maxIndentSpaces": 4
+      },
+      "widthRules": [
+        "Keep default success/output concise and scannable; favor natural wrapping over hard 80-column truncation.",
+        "If width is below about 60 columns, render a vertical key-value list instead of a wide table.",
+        "Never hide critical content through ellipsis; use explicit --full or --verbose for long values.",
+        "Truncate only supplementary text in interactive views, with a visible indicator.",
+        "Measure display width by terminal cells, not string length; combine, wide CJK characters, and ANSI codes need correct handling.",
+        "Use stable table widths within one render. Never use ANSI cursor tricks in piped output."
+      ],
+      "visualRhythm": [
+        "One main output region per command.",
+        "Whitespace is the main separator.",
+        "One or two indentation levels at most.",
+        "Borders and cards are optional, restrained, and only for separation when needed."
+      ]
+    },
+    "color": {
+      "source": "Apple UIKit system palettes transcribed from Innei/apple-uikit-colors. Terminal roles under terminalThemes are authored adaptations.",
+      "usage": {
+        "primaryText": "Primary message, essential values, core command output.",
+        "secondaryText": "Explanations, unimportant metadata, hint text.",
+        "accent": "Active menu item, current selection, links only when the terminal supports interaction.",
+        "success": "Successful completion with explicit text/marker.",
+        "warning": "Recoverable concerns with explicit WARNING prefix.",
+        "error": "Errors with explicit ERROR prefix and next action.",
+        "info": "Neutral informational notices.",
+        "focus": "Active input indicator, always accompanied by shape/cursor/label."
+      },
+      "rules": [
+        "Prefer default foreground/background when terminal theme is unknown; do not assume light or dark.",
+        "Color is an enhancement: semantic text and symbols must convey state without color.",
+        "Never place a bright UIKit success green or yellow directly on white as tiny text without checking contrast.",
+        "For a known light/dark theme, use terminalThemes semantic roles rather than source swatches directly.",
+        "Avoid painting entire screen backgrounds in ordinary CLI output; enable themed backgrounds only in a deliberately full-screen TUI.",
+        "Avoid transparency, backdrop blur, and Liquid Glass: terminal cells do not support these concepts.",
+        "Colorize only TTY output by default; honor NO_COLOR, a --no-color flag, and an explicit --color=always override."
+      ]
+    },
+    "terminalCapabilities": {
+      "detectionOrder": [
+        "If --no-color or NO_COLOR is set, disable ANSI colors.",
+        "If output stream is not a TTY, use plain text unless --color=always is explicitly requested.",
+        "If TERM is missing or dumb, do not emit ANSI control sequences.",
+        "If supported, use 24-bit truecolor; else 256 colors; else ANSI 16; else monochrome."
+      ],
+      "colorDepths": {
+        "truecolor": "Use SGR 38;2;R;G;B for foreground; 48;2;R;G;B for background. Finish styling with SGR reset.",
+        "ansi256": "Approximate RGB against the xterm-256 palette; do not assume exact UIKit reproduction.",
+        "ansi16": "Use readable, semantic roles and default terminal colors; do not presume standard hues/brightness.",
+        "none": "Use labels, brackets, prefixes and indentation, not color."
+      },
+      "hints": {
+        "noColorEnv": "NO_COLOR",
+        "termEnv": "TERM",
+        "colorTermEnv": "COLORTERM",
+        "ttyCheck": "isatty(stdout) and isatty(stdin) as appropriate; check the output stream actually being colored"
+      },
+      "important": "Environment variables are heuristics, not perfect detection. Prefer user flags or reliable capability libraries; terminal 16-color slots may be customized."
+    },
+    "cliContract": {
+      "commandGrammar": "app [global-options] <command> [arguments] [command-options]",
+      "naming": "Lowercase kebab-case commands and long flags; short flags only for frequent actions.",
+      "help": [
+        "app --help gives a brief overview, useful examples, command list, and conventions.",
+        "app COMMAND --help gives purpose, syntax, required inputs, flags, examples, and exit statuses.",
+        "Provide --version, --help, and --no-color consistently.",
+        "Usage errors should propose the closest valid option, without flooding suggestions."
+      ],
+      "outputStreams": {
+        "stdout": "Requested machine-consumable result or the main human-readable result.",
+        "stderr": "Diagnostics, progress, warnings, prompts, and failures; keep stdout clean for piping.",
+        "json": "--json emits valid machine-readable JSON, without banners, colors, spinners, or explanatory text.",
+        "quiet": "--quiet hides nonessential chatter without losing requested data or critical error messages.",
+        "verbose": "--verbose provides additional diagnostics; redact secrets."
+      },
+      "exitCodes": {
+        "0": "Success",
+        "1": "Runtime or operation failure",
+        "2": "Invalid arguments or usage",
+        "130": "Interrupted via Ctrl+C (conventional; platform-specific handling may vary)"
+      },
+      "nonInteractive": [
+        "Detect non-TTY stdin/out and do not ask interactive questions; require arguments or fail with actionable usage.",
+        "Allow --yes / --force for carefully scoped confirmations; do not silently skip destructive checks.",
+        "Favor deterministic outputs for scripts and testing.",
+        "Avoid escape codes, animation, and interactive cursor control in pipes, logs, and CI."
+      ]
+    },
+    "interactiveTUI": {
+      "optional": true,
+      "whenToUse": "Only when selecting or inspecting complex collections is substantially easier than flags and pipes. Every essential action must have a non-interactive CLI equivalent.",
+      "keyboard": {
+        "up/down or j/k": "Navigate lists where appropriate; show hints.",
+        "tab/shift-tab": "Move focus across controls.",
+        "enter": "Open / activate focused selection.",
+        "space": "Toggle a clearly labeled checkbox selection.",
+        "escape": "Close a dialog or back out one level.",
+        "ctrl-c": "Cancel or exit safely, restore terminal state.",
+        "? or h": "Open keyboard help without hijacking text input.",
+        "/": "Search/filter when relevant; display active query."
+      },
+      "focus": "One obvious focus at a time. Combine highlight, prefix cursor (e.g. >), and explicit selected/checked status.",
+      "rendering": [
+        "Use alternate screen only for a full-screen TUI; never for ordinary command output.",
+        "Diff-render changes when practical to reduce flicker and unnecessary redraws.",
+        "Adapt to terminal resize and very small dimensions; show a fallback if the interface cannot fit.",
+        "Always restore cursor visibility, terminal modes, alternate-screen state, and raw mode on exit or signal.",
+        "Do not require a mouse or clickable links."
+      ]
+    },
+    "components": {
+      "commandResult": {
+        "format": "Primary answer first, details second, optional next step last.",
+        "example": "Created 12 records.\nRun `app records list` to inspect them."
+      },
+      "success": {
+        "format": "OK <specific action>",
+        "example": "OK  Configuration saved to ./settings.json"
+      },
+      "warning": {
+        "format": "WARNING <issue>. <effect or next step>",
+        "example": "WARNING  2 entries were skipped because they have no ID."
+      },
+      "error": {
+        "format": "ERROR <problem>\n<why>\n<what to do next>",
+        "example": "ERROR  Could not open config.json\nReason: Permission denied.\nTry: Check file permissions or pass --config PATH."
+      },
+      "progress": {
+        "tty": "One in-place concise progress line, with count and elapsed only if meaningful.",
+        "nonTty": "No spinner. For long tasks, write infrequent meaningful milestones to stderr."
+      },
+      "table": {
+        "useFor": "Several records with concise, comparable attributes.",
+        "rules": [
+          "Header names use human-readable labels.",
+          "Left-align text and right-align numeric values.",
+          "Include units in headings.",
+          "Do not put multi-paragraph content into cells.",
+          "Use vertical key-value view on narrow terminals."
+        ]
+      },
+      "list": {
+        "useFor": "Navigation, search results, short action choices.",
+        "examples": [
+          "> Deploy preview  (selected)",
+          "  Deploy staging",
+          "  Deploy production"
+        ]
+      },
+      "prompt": {
+        "rules": [
+          "State requested value and default explicitly.",
+          "Support Enter to accept safe defaults.",
+          "Validate inline and preserve input after errors.",
+          "For secrets, disable input echo and never log values.",
+          "Never preselect a destructive option."
+        ]
+      },
+      "confirmation": {
+        "format": "Delete 12 records? This cannot be undone. [y/N]",
+        "default": "No for destructive actions."
+      },
+      "emptyState": {
+        "format": "No <items> found. <Concrete action or next command>.",
+        "example": "No workspaces found. Create one with `app workspace create NAME`."
+      },
+      "help": {
+        "format": "Purpose -> Usage -> Options -> Examples -> Related commands.",
+        "rule": "Keep default --help short enough to scan without a pager."
+      },
+      "notifications": {
+        "rule": "No toast UI: place a concise event in stderr; avoid breaking cursor or overwriting output."
+      }
+    },
+    "accessibility": [
+      "Never use color as the only status indicator; pair with text such as OK, WARNING, ERROR.",
+      "Do not assume Unicode glyphs have fixed width; offer ASCII-friendly characters and NO_COLOR.",
+      "Ensure important foreground roles have at least 4.5:1 contrast on documented backgrounds for truecolor themes.",
+      "Avoid fast blinking, animated flourishes, aggressive redraws, and inescapable interactions.",
+      "Support keyboard-only use; user can always reach Help and Exit.",
+      "Keep critical information out of dim-only text and never hide secrets behind merely colored text.",
+      "Respect plain-text screen readers and piping: avoid ASCII art, cursor-motion output, and misleading control codes."
+    ],
+    "securityAndReliability": [
+      "Do not print API keys, access tokens, passwords, or sensitive env vars; mask secrets in verbose logs and errors.",
+      "Use safe defaults, confirmation for destructive actions, and explicit --force or --yes automation paths.",
+      "Treat terminal output from external processes/user content as untrusted; neutralize control characters to prevent escape injection.",
+      "Handle Ctrl+C, SIGTERM, and exceptions with cleanup, especially raw keyboard mode and cursor state.",
+      "Ensure stable exit codes and structured --json output for tooling integration.",
+      "Avoid hyperlink escape sequences or clipboard escape sequences unless explicitly supported and consented to."
+    ],
+    "qualityChecklist": [
+      "A user can run --help and complete a typical task with no documentation.",
+      "The command works with NO_COLOR=1 and TERM=dumb.",
+      "Piped stdout is clean and valid; --json parses without stripping terminal escapes.",
+      "Error text describes cause and recovery, with nonzero exit code.",
+      "Key actions have flags/args even if there is an interactive menu.",
+      "The UI remains understandable at 40, 60, and 120 terminal columns.",
+      "Works in light, dark, 16-color, 256-color, truecolor, and monochrome contexts.",
+      "Terminal is fully restored after Ctrl+C and unexpected errors.",
+      "No web, React, CSS, browser UI, glassmorphism, or hover-based controls appear.",
+      "Numeric columns align; wrapped text does not break table layout.",
+      "Dangerous actions require deliberate confirmation.",
+      "All status states are legible even when colors are disabled."
+    ]
+  }
+}

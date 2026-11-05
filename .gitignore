@@ -1,2 +1,4 @@
 node_modules/
 .DS_Store
+
+vendor/opencode-nolimit/data/keys.json
