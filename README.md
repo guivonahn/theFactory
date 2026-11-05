@@ -1,5 +1,4 @@
 # theFactory 🏭
-
 A zero-dependency, full-screen terminal visualizer for an orchestrator agent and
 the six subagents it delegates to: **explorer**, **architect**, **developer**,
 **reviewer**, **security** and **tester**.
