@@ -207,6 +207,7 @@ export function buildLayout(width, height, options = {}) {
     sky: { rows: skyRows },
     statusRow: height - footerRows,
     inputRow: footerRows >= 2 ? height - 1 : null,
+    inputRows: footerRows >= 3 ? [height - 2, height - 1] : (footerRows >= 2 ? [height - 1] : []),
     agents,
     other,
     agentOrder: AGENT_ORDER,

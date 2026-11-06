@@ -61,6 +61,48 @@ test('App log viewer opens, cycles, scrolls and renders an overlay', () => {
   assert.doesNotMatch(snap, /LOG: DEVELOPER/);
 });
 
+test('App log wraps long entries into visual rows and clamps scroll over them', () => {
+  const app = makeApp();
+  const text = Array.from({ length: 36 }, (_, index) => `word${index}`).join(' ');
+  app.applyEvent({ kind: 'msg', from: 'developer', dir: 'in', text });
+  app.openLog('developer');
+
+  const wrapped = app._logLines(20);
+  assert.ok(wrapped.length > 1, 'long entry occupies multiple visual rows');
+  assert.ok(wrapped[0].startsWith('« '), 'entry marker stays on the first row');
+  assert.ok(wrapped.slice(1).every((line) => !line.startsWith('« ')));
+  assert.ok(wrapped.at(-1).includes('word35'));
+
+  const snapshot = app.snapshot().split('\n');
+  const header = snapshot.findIndex((line) => line.includes('LOG: DEVELOPER'));
+  assert.match(snapshot[header + 1], /1 entries/);
+  const body = snapshot.slice(header + 2, header + 20);
+  assert.ok(body.every((line) => !line.includes('…')));
+  assert.match(body.join('\n'), /word35/);
+
+  const allRows = app._logLines(100);
+  app.scrollLog(-100);
+  assert.deepEqual(app._logLines(2), allRows.slice(0, 2));
+  assert.equal(app.logView.scroll, allRows.length - 2);
+});
+
+test('App input wraps across two rows and keeps short input on one row', () => {
+  const app = new App({ width: 100, height: 32, color: false, mode: 'task', inputMode: true });
+  const value = Array.from({ length: 18 }, (_, index) => `token${index}`).join(' ');
+  app.setInputValue(value);
+  assert.deepEqual(app.layout.inputRows, [30, 31]);
+
+  let rows = app.snapshot().split('\n');
+  assert.match(rows[30], /task> .*token0/);
+  assert.match(rows[31], /token17▌/);
+  assert.ok(!rows[30].includes('…') && !rows[31].includes('…'));
+
+  app.setInputValue('short task');
+  rows = app.snapshot().split('\n');
+  assert.match(rows[30], /task> short task▌/);
+  assert.equal(rows[31], '');
+});
+
 test('App run status reports new vs continued with the session id', () => {
   const app = makeApp();
   app.startRun({ sessionID: null, resumed: false });

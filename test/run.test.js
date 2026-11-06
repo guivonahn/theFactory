@@ -1,12 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { parseRunLine, argsForRun } from '../src/run.js';
+import { parseRunLine, argsForRun, toolDetail } from '../src/run.js';
+import { convertRow } from '../src/live.js';
 
 const fixture = fs
   .readFileSync(new URL('./runLine.fixture.jsonl', import.meta.url), 'utf8')
   .trim()
   .split('\n');
+
+test('toolDetail extracts useful single-line tool input', () => {
+  assert.equal(toolDetail({ command: ' git   status\n--short ' }), 'git status --short');
+  assert.equal(toolDetail({ command: ['git', 'status', '--short'] }), 'git status --short');
+  assert.equal(toolDetail({ filePath: ' src/run.js ' }), 'src/run.js');
+  assert.equal(toolDetail({ pattern: 'foo\\s+bar' }), 'foo\\s+bar');
+  assert.equal(toolDetail({ title: 'Read config' }), 'Read config');
+  for (const input of [{}, undefined, null, 'git status', 42, true, []]) {
+    assert.equal(toolDetail(input), '');
+  }
+  const long = toolDetail({ command: `echo ${'x'.repeat(120)}` });
+  assert.equal(long.length, 101);
+  assert.ok(long.startsWith('…'));
+});
 
 test('parseRunLine captures the first session id and text part', () => {
   const start = parseRunLine(fixture[0]);
@@ -42,6 +57,42 @@ test('parseRunLine is tolerant of garbage and maps tool fan-out', () => {
   assert.equal(tool.events[0].kind, 'tool');
   assert.equal(tool.events[0].fanout, true);
   assert.equal(tool.events[0].to, 'explorer');
+});
+
+test('parseRunLine includes shell input in tool event text', () => {
+  const tool = parseRunLine(
+    JSON.stringify({
+      type: 'tool',
+      sessionID: 'ses_123',
+      part: {
+        type: 'tool',
+        tool: 'shell',
+        state: { input: { command: 'git status --short' } },
+      },
+    }),
+  );
+  assert.equal(tool.events[0].kind, 'tool');
+  assert.match(tool.events[0].text, /git status/);
+  assert.equal(tool.events[0].text, 'shell: git status --short');
+});
+
+test('convertRow includes live tool input and status in event text', () => {
+  const events = convertRow(
+    {
+      type: 'assistant',
+      data: JSON.stringify({
+        content: [
+          {
+            type: 'tool',
+            name: 'shell',
+            state: { status: 'running', input: { command: 'git status --short' } },
+          },
+        ],
+      }),
+    },
+    { isRoot: false, agentKey: 'builder' },
+  );
+  assert.equal(events[0].text, 'shell: git status --short (running)');
 });
 
 test('argsForRun passes --session for a continued session', () => {

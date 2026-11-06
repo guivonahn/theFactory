@@ -20,6 +20,25 @@ function tail(value, max = 160) {
   return text.length <= max ? text : `…${text.slice(-max)}`;
 }
 
+export function toolDetail(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
+  for (const key of ['command', 'script', 'cmd']) {
+    const value = input[key];
+    if (Array.isArray(value)) {
+      const command = tail(value.join(' '), 100);
+      if (command) return command;
+    } else {
+      const command = tail(value, 100);
+      if (command) return command;
+    }
+  }
+  for (const key of ['filePath', 'path', 'file', 'pattern', 'title', 'description']) {
+    const detail = tail(input[key], 100);
+    if (detail) return detail;
+  }
+  return '';
+}
+
 function parseJson(line) {
   try {
     const value = JSON.parse(line);
@@ -156,6 +175,7 @@ export function parseRunLine(line) {
       return result;
     }
     const input = part.state?.input ?? part.input ?? part.state?.metadata ?? {};
+    const detail = toolDetail(input);
     const rawAgent =
       input && typeof input === 'object'
         ? (input.agent ?? input.subagent_type ?? input.agent_type ?? input.subagent ?? null)
@@ -166,7 +186,7 @@ export function parseRunLine(line) {
     result.events.push({
       kind: 'tool',
       from: 'orchestrator',
-      text: tool,
+      text: detail ? `${tool}: ${detail}` : tool,
       fanout,
       to: target && target.key !== 'other' ? target.key : null,
     });

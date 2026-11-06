@@ -4,7 +4,7 @@
  */
 
 import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './agents.js';
-import { Canvas, truncate, wrapText } from './canvas.js';
+import { Canvas, displayWidth, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
 import { highlightLine } from './highlight.js';
@@ -72,7 +72,7 @@ export class App {
     this.color = options.color !== false;
     this.mode = options.mode ?? 'demo';
     this.inputMode = Boolean(options.inputMode);
-    this.footerRows = this.inputMode ? 2 : 1;
+    this.footerRows = this.inputMode ? 3 : 1;
     this.canvas = new Canvas(this.width, this.height, { color: this.color });
     this.layout = buildLayout(this.width, this.height, { footerRows: this.footerRows });
     this._indexSlots();
@@ -270,15 +270,16 @@ export class App {
     }) : [];
   }
 
-  /** Visible log lines for the overlay (shared by _drawLog and tests). */
+  /** Visible wrapped log rows for the overlay (shared by _drawLog and tests). */
   _logLines(visibleRows) {
-    const entries = this._logEntries();
-    const maxScroll = Math.max(0, entries.length - Math.max(1, visibleRows));
+    const boxWidth = Math.max(24, Math.min(this.width - 4, Math.floor(this.width * 0.7)));
+    const lines = this._logEntries().flatMap((entry) => wrapText(entry, boxWidth - 4));
+    const maxScroll = Math.max(0, lines.length - Math.max(1, visibleRows));
     const scroll = Math.min(this.logView.scroll, maxScroll);
     this.logView.scroll = scroll;
-    const end = entries.length - scroll;
+    const end = lines.length - scroll;
     const start = Math.max(0, end - Math.max(1, visibleRows));
-    return entries.slice(start, end);
+    return lines.slice(start, end);
   }
 
   /** Write one line with inline keyword highlighting. */
@@ -713,14 +714,16 @@ export class App {
 
   _drawInput() {
     if (this.layout.inputRow == null) return;
-    const row = this.layout.inputRow;
-    this.canvas.fill(row, 0, this.width, 1, ' ', 0);
+    const rows = this.layout.inputRows ?? [this.layout.inputRow];
+    for (const row of rows) this.canvas.fill(row, 0, this.width, 1, ' ', 0);
+    const row = rows[0];
     const prompt = 'task> ';
-    const inner = Math.max(1, this.width - prompt.length - 3);
+    const promptCol = 1 + prompt.length;
+    const inner = Math.max(1, this.width - promptCol - 2);
     this.canvas.write(row, 1, prompt, this.run.state === 'running' ? T.textSecondary : ORCHESTRATOR.color);
     if (!this.inputValue) {
-      this.canvas.write(row, 1 + prompt.length + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), T.border);
-      this.canvas.put(row, 1 + prompt.length, '▌', T.textPrimary);
+      this.canvas.write(row, promptCol + 2, truncate('type a task and press enter', Math.max(1, inner - 2)), T.border);
+      this.canvas.put(row, promptCol, '▌', T.textPrimary);
       return;
     }
     // Multiline prompt: collapsed `[pasted n lines]` preview (like opencode),
@@ -729,10 +732,14 @@ export class App {
     const total = all.length;
     const lastLine = (all[all.length - 1] ?? '').replace(/\r$/, '');
     const prefix = total > 1 ? `[pasted ${total} lines] ` : '';
-    const visible = truncate(prefix + lastLine, inner);
-    this.canvas.write(row, 1 + prompt.length, visible, T.textPrimary);
-    const cursorCol = 1 + prompt.length + visible.length;
-    this.canvas.put(row, cursorCol, '▌', T.textPrimary);
+    const lines = wrapText(prefix + lastLine, inner);
+    const visible = lines.slice(-rows.length);
+    visible.forEach((line, index) => {
+      this.canvas.write(rows[index], promptCol, line, T.textPrimary);
+    });
+    const lastRow = rows[visible.length - 1];
+    const cursorCol = promptCol + displayWidth(visible[visible.length - 1] ?? '');
+    this.canvas.put(lastRow, cursorCol, '▌', T.textPrimary);
   }
 
   _drawStatus() {

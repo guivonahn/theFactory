@@ -28,7 +28,7 @@ test('agent boxes grow at 100x40', () => {
 });
 
 test('all agent boxes fit inside the 60x24 frame', () => {
-  for (const footerRows of [1, 2]) {
+  for (const footerRows of [1, 2, 3]) {
     const layout = buildLayout(60, 24, { footerRows });
     assert.equal(layout.tooSmall, false);
     assert.equal(layout.agents.length, 6);
@@ -42,6 +42,17 @@ test('top, middle, and bottom bands do not overlap vertically', () => {
   for (const [width, height] of [[60, 24], [100, 40]]) {
     assertBandsDoNotOverlap(buildLayout(width, height));
   }
+});
+
+test('layout exposes one or two input rows without changing inputRow', () => {
+  const twoRows = buildLayout(100, 32, { footerRows: 2 });
+  assert.deepEqual(twoRows.inputRows, [31]);
+  assert.equal(twoRows.inputRow, 31);
+
+  const threeRows = buildLayout(100, 32, { footerRows: 3 });
+  assert.deepEqual(threeRows.inputRows, [30, 31]);
+  assert.equal(threeRows.inputRow, 31);
+  assert.equal(threeRows.statusRow, 29);
 });
 
 test('layout still rejects sizes below 60x24', () => {

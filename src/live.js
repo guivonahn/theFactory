@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveAgent } from './agents.js';
+import { toolDetail } from './run.js';
 
 export const DEFAULT_DB_PATH = path.join(os.homedir(), '.local/share/opencode/opencode.db');
 
@@ -229,7 +230,12 @@ export function convertRow(row, meta) {
   for (const part of content) {
     if (part?.type !== 'tool') continue;
     const state = part.state?.status ? ` (${part.state.status})` : '';
-    events.push({ kind: 'tool', from: meta.agentKey, text: `${part.name ?? 'tool'}${state}` });
+    const detail = toolDetail(part.state?.input ?? part.input ?? {});
+    events.push({
+      kind: 'tool',
+      from: meta.agentKey,
+      text: `${part.name ?? 'tool'}${detail ? `: ${detail}` : ''}${state}`,
+    });
   }
 
   const text = tail(textParts(data).join(' '), 160);
