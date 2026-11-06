@@ -842,7 +842,10 @@ async function runTui(mode, options) {
     } catch {
       // stdin may already be closed.
     }
-    if (screenEntered) out.write('\x1b[0m\x1b[?25h\x1b[?1049l');
+    if (screenEntered) {
+      try { out.write('\x1b[?1000l\x1b[?1006l'); } catch {}
+      out.write('\x1b[0m\x1b[?25h\x1b[?1049l');
+    }
   };
 
   const stop = (code = 0) => {
@@ -974,25 +977,40 @@ async function runTui(mode, options) {
           ? 'opencode binary not found — set FACTORY_OPENCODE or install opencode'
           : rawMessage;
       app.finishRun('error', message);
+      app.addLog('═══ FAILED TASK REPORT ═══');
+      app.addLog(`reason: ${truncate(message, 108)}`);
       app.addLog(`! ${truncate(message, 110)}`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ ${truncate(message, 80)}` });
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
     } else if (abortRequested) {
       app.finishRun('aborted');
+      app.addLog('═══ FAILED TASK REPORT ═══');
+      app.addLog('reason: task aborted by user');
       app.addLog(`■ aborted after ${elapsed}s`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: '■ task aborted' });
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: '■ FAILED TASK REPORT · aborted' });
     } else if (result.code === 0 && hadPermissionFailure) {
       const message = permissionFailureMessage || 'permission denied — see log';
       app.finishRun('error', message);
+      app.addLog('═══ FAILED TASK REPORT ═══');
+      app.addLog(`reason: ${truncate(message, 108)}`);
       app.addLog(`! ${truncate(message, 110)}`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ permission failure: ${truncate(message, 80)}` });
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
     } else if (result.code === 0) {
       const detail = lastText.trim();
       app.finishRun('done', detail);
-      app.addLog(`✓ complete in ${elapsed}s${detail ? ` · ${truncate(detail, 80)}` : ''}`);
+      app.addLog('═══ FINISHED TASK REPORT ═══');
+      if (detail) {
+        for (const line of detail.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed) app.addLog(trimmed.slice(0, 110));
+        }
+      } else {
+        app.addLog('(no final report)');
+      }
+      app.addLog(`✓ complete in ${elapsed}s`);
       app.applyEvent({
         kind: 'status',
         from: 'orchestrator',
-        text: `✓ task complete in ${Math.max(1, elapsed)}s`,
+        text: `✓ FINISHED TASK REPORT · ${Math.max(1, elapsed)}s`,
       });
     } else {
       const stderrTail = String(result.stderr ?? '')
@@ -1003,8 +1021,10 @@ async function runTui(mode, options) {
         .join(' ');
       const message = stderrTail || `opencode exited with code ${result.code}`;
       app.finishRun('error', message);
+      app.addLog('═══ FAILED TASK REPORT ═══');
+      app.addLog(`reason: ${truncate(message, 108)}`);
       app.addLog(`! ${truncate(message, 110)}`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ ${truncate(message, 80)}` });
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
     }
     abortRequested = false;
     app.setInputValue(lineInput?.value ?? '');
@@ -1478,7 +1498,21 @@ async function runTui(mode, options) {
   };
 
   const onKey = (buffer) => {
-    const text = buffer.toString('utf8');
+    const raw = buffer.toString('utf8');
+    // SGR mouse reporting: left-click on an agent's "msg: n" line opens its log.
+    const mousePattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+    let mouseOnly = false;
+    let hadMouse = false;
+    const text = raw.replace(mousePattern, (_, button, x, y, type) => {
+      hadMouse = true;
+      if (type === 'M' && button === '0'
+          && !app.questionView?.open && !app.imageView?.open) {
+        const key = app.hitAgentMsg(Number(x), Number(y));
+        if (key) app.openLog(key);
+      }
+      return '';
+    });
+    if (hadMouse && text.trim() === '') return;
     // Questions consume every key first: in particular Esc cancels the form,
     // never the underlying run. API actions stay asynchronous to rendering.
     if (app.questionView.open) {
@@ -1567,9 +1601,9 @@ async function runTui(mode, options) {
 
     out.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
     screenEntered = true;
-    // Enable bracketed paste (terminals send \x1b[200~ … \x1b[201~ markers,
-    // letting LineInput insert multi-line pastes verbatim without submitting).
+    // Enable bracketed paste and SGR mouse reporting (click-to-open agent logs).
     try { out.write('\x1b[?2004h'); } catch {}
+    try { out.write('\x1b[?1000h\x1b[?1006h'); } catch {}
     out.write(app.frame());
     if (input.isTTY) {
       input.setRawMode(true);

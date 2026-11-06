@@ -58,13 +58,8 @@ export function skyRowsFor(height) {
   return Math.max(3, Math.min(7, Math.floor((height - 24) / 2) + 3));
 }
 
-function agentSlotBox(side, band, width, height, boxWidth, boxHeight, centerRow, footerRows, skyRows) {
-  const rowByBand = {
-    top: 1 + skyRows,
-    middle: centerRow - Math.floor(boxHeight / 2),
-    bottom: height - boxHeight - footerRows,
-  };
-  const row = rowByBand[band];
+function agentSlotBox(side, band, width, boxWidth, boxHeight, bandRows) {
+  const row = bandRows[band];
   const col = side === 'left' ? 2 : width - boxWidth - 2;
   return { row, col, width: boxWidth, height: boxHeight };
 }
@@ -130,23 +125,45 @@ export function buildLayout(width, height, options = {}) {
   }
 
   const footerRows = Math.max(1, Math.min(3, options.footerRows ?? 1));
+  const skyRows = skyRowsFor(height);
+  const centerRow = Math.floor(height / 2);
+  const topRow = 1 + skyRows;
 
-  const boxWidth = Math.max(17, Math.min(28, Math.round(width * 0.27)));
-  const boxHeight = height < 34 ? 5 : height < 36 ? 6 : 7;
-  const centerWidth = Math.min(44, Math.max(20, width - 2 * (boxWidth + 5)));
+  // Boxes get noticeably bigger on roomy terminals while still leaving the
+  // top band clear of the centre box and the branch gaps intact.
+  const desiredWidth = Math.round(width * 0.39);
+  const centerWidth = Math.min(44, Math.max(20, width - 2 * (desiredWidth + 5)));
+  const maxBoxWidth = Math.floor((width - centerWidth) / 2) - 3;
+  const boxWidth = Math.max(16, Math.min(40, desiredWidth, maxBoxWidth));
+  const boxHeight = Math.max(
+    5,
+    Math.min(
+      10,
+      centerRow - topRow - 3,
+      Math.floor((height - topRow - footerRows) / 3),
+    ),
+  );
+
+  // Distribute the three bands with equal gaps between them.
+  const available = height - footerRows - topRow;
+  const gap = Math.max(0, Math.floor((available - 3 * boxHeight) / 2));
+  const bandRows = {
+    top: topRow,
+    middle: topRow + boxHeight + gap,
+    bottom: topRow + 2 * boxHeight + 2 * gap,
+  };
+
   const center = {
-    row: Math.floor(height / 2) - 3,
+    row: centerRow - 3,
     col: Math.floor((width - centerWidth) / 2),
     width: centerWidth,
     height: 7,
   };
   center.midRow = center.row + Math.floor(center.height / 2);
   center.midCol = center.col + Math.floor(center.width / 2);
-  const centerRow = Math.floor(height / 2);
-  const skyRows = skyRowsFor(height);
 
   const agents = SLOT_SPECS.map((spec) => {
-    const box = agentSlotBox(spec.side, spec.band, width, height, boxWidth, boxHeight, centerRow, footerRows, skyRows);
+    const box = agentSlotBox(spec.side, spec.band, width, boxWidth, boxHeight, bandRows);
     const path = branchFor(spec, box, center);
     return {
       key: spec.key,
@@ -160,7 +177,7 @@ export function buildLayout(width, height, options = {}) {
   });
 
   const otherBox = {
-    row: height - boxHeight - footerRows,
+    row: bandRows.bottom,
     col: center.midCol - Math.floor(boxWidth / 2),
     width: boxWidth,
     height: boxHeight,

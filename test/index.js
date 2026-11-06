@@ -9,6 +9,7 @@ import './graphify.test.js';
 import './forms.test.js';
 import './media.test.js';
 import './opencodeApi.test.js';
+import './highlight.test.js';
 import './demo.test.js';
 import '../workin_on/factory.test.js';
 import './plan.test.js';

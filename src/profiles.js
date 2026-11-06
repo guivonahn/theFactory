@@ -12,7 +12,7 @@ export const VARIANT_ORDER = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 // A free-only profile: every agent must run on an `opencode/*-free` model, so
 // no subscription (and no OC-NOLIMIT proxy) is required.
 export const FREE_AGENT_MODELS = {
-  orchestrator: 'opencode/glm-5.3-flash-free',
+  orchestrator: 'opencode/crouton-alpha-free',
   architect: 'opencode/deepseek-v4.1-flash-free',
   explorer: 'opencode/mimo-v2.6-flash-free',
   developer: 'opencode/flint-40b-free',

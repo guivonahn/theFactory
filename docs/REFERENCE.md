@@ -63,7 +63,7 @@ subscription and no `OC-NOLIMIT` proxy.
 
 | Agent | Free model |
 | --- | --- |
-| orchestrator | `opencode/glm-5.3-flash-free` |
+| orchestrator | `opencode/crouton-alpha-free` |
 | architect | `opencode/deepseek-v4.1-flash-free` |
 | explorer | `opencode/mimo-v2.6-flash-free` |
 | developer | `opencode/flint-40b-free` |

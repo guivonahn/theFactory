@@ -7,6 +7,7 @@ import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './a
 import { Canvas, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
+import { highlightLine } from './highlight.js';
 import { drawFactory } from '../workin_on/factory.js';
 import {
   createQuestionState,
@@ -159,6 +160,23 @@ export class App {
     this.logView.scroll = 0;
   }
 
+  /** Map a terminal (1-based) click to an agent whose msg counter was hit. */
+  hitAgentMsg(x, y) {
+    const cy = y - 1;
+    const cx = x - 1;
+    for (const [key] of this.agents) {
+      if (key === 'other' && !this.showOther) continue;
+      const slot = this._slots.get(key);
+      if (!slot) continue;
+      const box = slot.box;
+      const statsRow = box.row + box.height - 2;
+      if (cy !== statsRow) continue;
+      if (cx < box.col + 2 || cx > box.col + box.width - 3) continue;
+      return key;
+    }
+    return null;
+  }
+
   /** Close the log overlay. */
   closeLog() {
     this.logView.open = false;
@@ -245,7 +263,11 @@ export class App {
       return entries;
     }
     const state = this.agents.get(key);
-    return state ? state.history.map((entry) => `${entry.dir} ${entry.text}`) : [];
+    return state ? state.history.map((entry) => {
+      if (entry.kind === 'tool') return `⚒ ${entry.text}`;
+      if (entry.kind === 'status') return `• ${entry.text}`;
+      return `${entry.dir === 'in' ? '«' : '»'} ${entry.text}`;
+    }) : [];
   }
 
   /** Visible log lines for the overlay (shared by _drawLog and tests). */
@@ -259,7 +281,15 @@ export class App {
     return entries.slice(start, end);
   }
 
-  /** Set the current composer value; the block cursor always sits at the end. */
+  /** Write one line with inline keyword highlighting. */
+  _writeHighlighted(row, col, text, width, baseStyle = T.textPrimary) {
+    const line = truncate(text, width);
+    let cursor = col;
+    for (const segment of highlightLine(line, baseStyle)) {
+      cursor = this.canvas.write(row, cursor, segment.text, segment.style);
+    }
+    return cursor;
+  }
   setInputValue(value) {
     this.inputValue = String(value ?? '');
   }
@@ -358,7 +388,7 @@ export class App {
 
   _addMessage(state, dir, text) {
     state.messages.push({ dir, text });
-    if (state.messages.length > 2) state.messages.shift();
+    if (state.messages.length > 16) state.messages.shift();
     state.messageCount += 1;
   }
 
@@ -588,11 +618,11 @@ export class App {
       const recent = this.centerLog.slice(-3);
       recent.forEach((line, index) => {
         const style = index === recent.length - 1 ? T.textPrimary : T.textSecondary;
-        this.canvas.write(box.row + 1 + index, box.col + 2, truncate(line, inner - 2), style);
+        this._writeHighlighted(box.row + 1 + index, box.col + 2, line, inner - 2, style);
       });
     } else {
       const lines = wrapText(this.activity, inner - 4);
-      this.canvas.write(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, T.textPrimary);
+      this._writeHighlighted(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, inner - 2, T.textPrimary);
       this.canvas.write(box.row + 2, box.col + 2, truncate(lines[1] ?? '', inner - 2), T.textSecondary);
     }
 
@@ -605,10 +635,11 @@ export class App {
       const extra = this.parallel.workers.length > 2 ? ` · +${this.parallel.workers.length - 2}w` : '';
       this.canvas.write(box.row + 3, box.col + 2, truncate(list ? `workers: ${list}${extra}` : 'workers: none', inner - 2), T.textSecondary);
     }
-    this.canvas.write(
+    this._writeHighlighted(
       box.row + 4,
       box.col + 2,
-      truncate(`msgs ${this.totalMessages} · tools ${this.totalTools} · ${Math.round(this.totalKb)}kb`, inner - 2),
+      `msgs ${this.totalMessages} · tools ${this.totalTools} · ${Math.round(this.totalKb)}kb`,
+      inner - 2,
       GRAY.gray2,
     );
     this.canvas.write(
@@ -633,7 +664,8 @@ export class App {
       const stamp = { glyph: status.glyph, color: status.color };
       this.canvas.put(box.row, box.col + box.width - 2, stamp.glyph, stamp.color);
 
-      for (let index = 0; index < 2; index += 1) {
+      const feedRows = Math.max(2, box.height - 3);
+      for (let index = 0; index < feedRows; index += 1) {
         const message = state.messages[index];
         if (!message) {
           if (index === 0 && state.messageCount === 0) {
@@ -643,7 +675,7 @@ export class App {
         }
         const prefix = message.dir === 'out' ? '»' : '«';
         this.canvas.put(box.row + 1 + index, box.col + 2, prefix, def.color);
-        this.canvas.write(box.row + 1 + index, box.col + 4, truncate(message.text, inner - 4), T.textPrimary);
+        this._writeHighlighted(box.row + 1 + index, box.col + 4, message.text, inner - 4, T.textPrimary);
       }
 
       const sessions = state.sessions > 1 ? ` · ${state.sessions} sess` : '';
@@ -747,16 +779,17 @@ export class App {
     const visibleRows = Math.max(1, boxHeight - 4);
     const lines = this._logLines(visibleRows);
     lines.forEach((line, index) => {
-      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), T.textPrimary);
+      this._writeHighlighted(row + 2 + index, col + 2, line, boxWidth - 4, T.textPrimary);
     });
     if (lines.length === 0) {
-      this.canvas.write(row + 2, col + 2, truncate('(no messages yet)', boxWidth - 4), T.textMuted);
+      this._writeHighlighted(row + 2, col + 2, '(no messages yet)', boxWidth - 4, T.textMuted);
     }
-    this.canvas.write(
+    this._writeHighlighted(
       row + boxHeight - 1,
       col + 2,
       truncate('←/→ agent · ↑/↓ scroll · esc close · 1-6 pillars', boxWidth - 4),
-      T.textPrimary,
+      boxWidth - 4,
+      T.textSecondary,
     );
   }
 

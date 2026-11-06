@@ -16,7 +16,7 @@ test('App accumulates full per-agent history beyond the 2-line feed', () => {
   app.applyEvent({ kind: 'status', from: 'developer', text: 'done' });
 
   const state = app.agents.get('developer');
-  assert.equal(state.messages.length, 2, 'pillar feed still shows the last 2');
+  assert.equal(state.messages.length, 5, 'pillar feed keeps the last messages');
   assert.ok(state.history.length >= 7, `history keeps everything, got ${state.history.length}`);
   assert.ok(state.history.some((entry) => entry.text === 'note 0'));
   assert.ok(state.history.some((entry) => entry.kind === 'tool' && entry.text === 'edit auth.js'));
