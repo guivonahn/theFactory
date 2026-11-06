@@ -4,6 +4,7 @@
  */
 
 import process from 'node:process';
+import { spawn } from 'node:child_process';
 import * as readlinePromises from 'node:readline/promises';
 import { readFileSync } from 'node:fs';
 import { App } from './app.js';
@@ -29,6 +30,11 @@ import {
   savePersistedSession,
 } from './sessionState.js';
 import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
+import { PROFILE_ORDER, applyProfileToAllAgents } from './profiles.js';
+import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
+import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
+import { apiRequest, formAnswerBody } from './opencodeApi.js';
+import { openExternalCommand } from './media.js';
 
 const FPS = 12;
 const { version } = JSON.parse(
@@ -55,9 +61,13 @@ Flags:
   --new / --fresh        task mode: ignore the persisted session and start brand-new
   --dir <path>           prefer sessions in this directory; task cwd
   --model <model#var>    forwarded to opencode run as -m
+  --profile <profile>    apply a low, medium, high, or free model profile in /config
+  --verbosity <level>    set agent verbosity: low, medium, or high (lower talks less, saves tokens)
   --fallback-models <csv> comma-separated fallback models tried in order on quota/no-route (bounded, env FACTORY_FALLBACK_MODELS)
   --auto                 auto-approve opencode ask permissions via --auto (explicit opt-in for trusted unattended only; deny stays enforced)
   --no-auto              do not pass --auto (default); ask rules are auto-rejected headlessly (surfaced as ⚠, never silent success)
+  --graphify             prepare and use graphify-out/graph.json for task prompts (default)
+  --no-graphify          disable graphify (also FACTORY_GRAPHIFY=0)
   --parallel             run tasks in parallel (scheduler + independent workers; default concurrency 3)
   --workers <n>          parallel worker/concurrency limit (default 3, min 1)
   --sequential           force single-worker execution (debugging)
@@ -79,13 +89,14 @@ Task-mode composer commands (typed instead of a task):
   /resume <id|#n>        continue that session on the next task
   /fallback [list]       show/set quota fallback models (comma-separated, max 8; /fallback clear to reset)
   /models                list OpenCode Go models available for fallback
+  /log                   open the log viewer (works even while a task is running)
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
-Keys in all TUI modes: l opens the log viewer (task mode: only when the
-composer is empty, so typing l mid-task still works). In the log viewer:
-←/→ cycle agent (orchestrator + 6 pillars + other), ↑/↓ scroll, 1-6 jump to
-explorer/architect/developer/reviewer/security/tester, Esc closes.
+Keys in live/demo modes: l opens the log viewer (there is no composer there).
+In the log viewer: ←/→ cycle agent (orchestrator + 6 pillars + other), ↑/↓
+scroll, 1-6 jump to explorer/architect/developer/reviewer/security/tester,
+Esc closes.
 The visualizer needs at least ${MIN_WIDTH}x${MIN_HEIGHT}.
 
 Session persistence (task mode): the last session id is saved to
@@ -124,6 +135,20 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
     const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
     options.model = next;
     return next ?? '(default)';
+  }
+  if (key === 'profile') {
+    const cycle = [null, ...PROFILE_ORDER];
+    const index = cycle.indexOf(options.profile ?? null);
+    const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
+    options.profile = next;
+    return next ? next.toUpperCase() : '(default)';
+  }
+  if (key === 'verbose') {
+    const cycle = [null, ...VERBOSITY_ORDER];
+    const index = cycle.indexOf(options.verbosity ?? null);
+    const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
+    options.verbosity = next;
+    return next ? next.toUpperCase() : '(default)';
   }
   if (key === 'fallbacks') {
     const presets = [
@@ -165,6 +190,10 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
     options.nolimit = options.nolimit ? null : 'status';
     return options.nolimit ? 'ON' : 'OFF';
   }
+  if (key === 'graphify') {
+    options.graphify = !options.graphify;
+    return options.graphify ? 'ON' : 'OFF';
+  }
   return null;
 }
 
@@ -181,7 +210,10 @@ export function parseArgs(argv) {
     packetSpeed: 400,
     fast: false,
     model: null,
+    profile: null,
+    verbosity: null,
     auto: false,
+    graphify: true,
     parallel: false,
     workers: 3,
     sequential: false,
@@ -196,6 +228,7 @@ export function parseArgs(argv) {
   // Env fallback selector (comma-separated, no spaces needed).
   const envFallback = process.env.FACTORY_FALLBACK_MODELS;
   if (envFallback) options.fallbackModels = parseModelList(envFallback);
+  if (process.env.FACTORY_GRAPHIFY === '0') options.graphify = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -230,6 +263,20 @@ export function parseArgs(argv) {
     } else if (arg === '--model') {
       options.model = requireValue(argv, index, arg);
       index += 1;
+    } else if (arg === '--profile') {
+      const profile = requireValue(argv, index, arg);
+      if (!PROFILE_ORDER.includes(profile)) {
+        throw new Error('--profile expects low, medium, high, or free');
+      }
+      options.profile = profile;
+      index += 1;
+    } else if (arg === '--verbosity') {
+      const verbosity = requireValue(argv, index, arg);
+      if (!VERBOSITY_ORDER.includes(verbosity)) {
+        throw new Error('--verbosity expects low, medium, or high');
+      }
+      options.verbosity = verbosity;
+      index += 1;
     } else if (arg === '--fallback-models') {
       options.fallbackModels = parseModelList(requireValue(argv, index, arg));
       index += 1;
@@ -255,6 +302,10 @@ export function parseArgs(argv) {
       options.auto = true;
     } else if (arg === '--no-auto') {
       options.auto = false;
+    } else if (arg === '--graphify') {
+      options.graphify = true;
+    } else if (arg === '--no-graphify') {
+      options.graphify = false;
     } else if (arg === '--parallel') {
       options.parallel = true;
     } else if (arg === '--resume') {
@@ -477,6 +528,24 @@ async function runTui(mode, options) {
     inputMode: mode === 'task',
   });
 
+  // CLI profile/verbosity flags mutate the global OpenCode config before the
+  // first task, so the next `opencode run` picks them up. Failures are logged
+  // (never fatal) because the TUI still works with the existing config.
+  if (mode === 'task') {
+    if (options.profile) {
+      const applied = applyProfileToAllAgents(options.profile);
+      app.addLog(applied.ok
+        ? `profile ${options.profile} · applied to ${applied.agents} agent(s) + default`
+        : `! profile ${options.profile} · ${applied.error ?? 'apply failed'}`);
+    }
+    if (options.verbosity) {
+      const applied = applyVerbosityToAllAgents(options.verbosity);
+      app.addLog(applied.ok
+        ? `verbose ${options.verbosity} · applied to ${applied.agents} agent(s)`
+        : `! verbose ${options.verbosity} · ${applied.error ?? 'apply failed'}`);
+    }
+  }
+
   const out = process.stdout;
   const input = process.stdin;
   let source = null;
@@ -496,6 +565,13 @@ async function runTui(mode, options) {
   let permissionFailureMessage = '';
   let killTimer = null;
   let attachTimer = null;
+  let formPollTimer = null;
+  let formPollInFlight = false;
+  let formPollEpoch = 0;
+  let pendingFormID = null;
+  let questionRequest = null;
+  const seenForms = new Set();
+  const seenImages = new Set();
   let lastText = '';
   let runToken = 0;
   const lineInput = mode === 'task' ? new LineInput(options.task ?? '') : null;
@@ -515,12 +591,162 @@ async function runTui(mode, options) {
     }
   }
 
+  const apiBin = options.opencode ?? process.env.FACTORY_OPENCODE ?? 'opencode';
+  const apiOptions = { bin: apiBin };
+
+  const stopFormPolling = () => {
+    formPollEpoch += 1;
+    if (formPollTimer) clearTimeout(formPollTimer);
+    formPollTimer = null;
+  };
+
+  const scheduleFormPoll = (epoch, delay = 900) => {
+    if (stopped || epoch !== formPollEpoch || mode !== 'task' || !currentSessionID) return;
+    if (app.run.state !== 'running') return;
+    if (formPollTimer) clearTimeout(formPollTimer);
+    formPollTimer = setTimeout(() => { void pollPendingForms(epoch); }, delay);
+  };
+
+  const pollPendingForms = async (epoch) => {
+    formPollTimer = null;
+    if (stopped || epoch !== formPollEpoch || mode !== 'task') return;
+    if (formPollInFlight) {
+      scheduleFormPoll(epoch, 200);
+      return;
+    }
+    const sessionID = currentSessionID;
+    if (!sessionID || app.run.state !== 'running') return;
+    // Polling may start while graphify/nolimit preparation is still underway.
+    if (!activeRun) {
+      scheduleFormPoll(epoch, 250);
+      return;
+    }
+
+    const token = runToken;
+    formPollInFlight = true;
+    try {
+      const result = await apiRequest(
+        'get',
+        `/api/session/${encodeURIComponent(sessionID)}/form`,
+        null,
+        apiOptions,
+      );
+      if (stopped || epoch !== formPollEpoch || token !== runToken) return;
+      if (!result.ok || app.questionView.open) return;
+      const forms = Array.isArray(result.data?.data)
+        ? result.data.data
+        : Array.isArray(result.data)
+          ? result.data
+          : [];
+      const form = forms.find((entry) => (
+        entry && typeof entry === 'object' && typeof entry.id === 'string' && !seenForms.has(entry.id)
+      ));
+      if (!form) return;
+      seenForms.add(form.id);
+      pendingFormID = form.id;
+      app.openQuestion(form, { sessionID });
+      app.addLog(`❓ question: ${form.title || form.id}`);
+    } catch {
+      // Polling is opportunistic; a shared-server restart must not fail a run.
+    } finally {
+      formPollInFlight = false;
+      scheduleFormPoll(epoch);
+    }
+  };
+
+  const startFormPolling = () => {
+    stopFormPolling();
+    if (mode !== 'task' || !currentSessionID || app.run.state !== 'running') return;
+    scheduleFormPoll(formPollEpoch, 0);
+  };
+
+  const pollFormsSoon = () => {
+    if (mode === 'task' && currentSessionID && app.run.state === 'running') {
+      scheduleFormPoll(formPollEpoch, 0);
+    }
+  };
+
+  const closeQuestionAtRunEnd = () => {
+    pendingFormID = null;
+    if (!app.questionView.open) return;
+    app.closeQuestion();
+    app.addLog('question closed · run finished');
+  };
+
+  const answerQuestion = async (answer) => {
+    const state = app.questionView;
+    const sessionID = state.sessionID ?? currentSessionID;
+    const formID = pendingFormID ?? state.form?.id;
+    if (!state.open || !sessionID || !formID || questionRequest) return;
+    const token = runToken;
+    const request = { state, token };
+    questionRequest = request;
+    try {
+      const result = await apiRequest(
+        'post',
+        `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`,
+        formAnswerBody(answer),
+        apiOptions,
+      );
+      if (stopped || token !== runToken || app.questionView !== state) return;
+      if (!result.ok) {
+        const message = result.error || 'question reply failed';
+        app.setQuestionError(message);
+        app.addLog(`! question: ${truncate(message, 100)}`);
+        return;
+      }
+      app.closeQuestion();
+      pendingFormID = null;
+      app.addLog('✓ question answered');
+      pollFormsSoon();
+    } finally {
+      if (questionRequest === request) questionRequest = null;
+    }
+  };
+
+  const cancelQuestion = () => {
+    const state = app.questionView;
+    const sessionID = state.sessionID ?? currentSessionID;
+    const formID = pendingFormID ?? state.form?.id;
+    if (!state.open) return;
+    app.closeQuestion();
+    pendingFormID = null;
+    app.addLog('question cancelled');
+    if (sessionID && formID) {
+      void apiRequest(
+        'delete',
+        `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}`,
+        null,
+        apiOptions,
+      ).catch(() => {}).finally(pollFormsSoon);
+    } else {
+      pollFormsSoon();
+    }
+  };
+
+  const openExternal = (target) => {
+    if (!target) return;
+    try {
+      const { command, args } = openExternalCommand(target);
+      const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+      child.once('error', (error) => {
+        if (!stopped) app.addLog(`! open externally: ${truncate(error?.message ?? String(error), 90)}`);
+      });
+      child.unref();
+    } catch (error) {
+      app.addLog(`! open externally: ${truncate(error?.message ?? String(error), 90)}`);
+    }
+  };
+
   // Current settings for the /config card. Readers (run launch, scheduler)
   // consume `options` at launch time, so live mutations apply to the next task.
   const configSnapshot = () => ({
     model: options.model,
+    profile: options.profile,
+    verbosity: options.verbosity,
     fallbackModels: options.fallbackModels,
     auto: options.auto,
+    graphify: options.graphify,
     parallel: options.parallel,
     workers: options.workers,
     sequential: options.sequential,
@@ -547,10 +773,33 @@ async function runTui(mode, options) {
       // The card's model is global: push it into opencode.json for the
       // orchestrator, every subagent, and the top-level default.
       const applied = applyModelToAllAgents(options.model);
-      if (applied.ok) {
-        app.addLog(`config · model → ${value} · applied to all ${applied.agents} agent(s) + default`);
+      let profileError = null;
+      // The free profile pins every agent, so an explicit model choice exits it.
+      const freeNote = options.profile === 'free' ? ' · free profile cleared' : '';
+      if (options.profile === 'free') options.profile = null;
+      if (applied.ok && options.profile) {
+        const profileApplied = applyProfileToAllAgents(options.profile);
+        if (!profileApplied.ok) profileError = profileApplied.error ?? 'profile apply failed';
+      }
+      if (applied.ok && !profileError) {
+        app.addLog(`config · model → ${value} · applied to all ${applied.agents} agent(s) + default${freeNote}`);
       } else {
-        app.addLog(`! config · model → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
+        const error = applied.ok ? profileError : (applied.error ?? 'apply failed');
+        app.addLog(`! config · model → ${value} · ${truncate(error, 90)}`);
+      }
+    } else if (key === 'profile') {
+      const applied = applyProfileToAllAgents(options.profile);
+      if (applied.ok) {
+        app.addLog(`config · profile → ${value} · applied to ${applied.agents} agent(s) + default`);
+      } else {
+        app.addLog(`! config · profile → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
+      }
+    } else if (key === 'verbose') {
+      const applied = applyVerbosityToAllAgents(options.verbosity);
+      if (applied.ok) {
+        app.addLog(`config · verbose → ${value} · applied to ${applied.agents} agent(s)`);
+      } else {
+        app.addLog(`! config · verbose → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
       }
     } else {
       app.addLog(`config · ${key} → ${value}`);
@@ -571,6 +820,7 @@ async function runTui(mode, options) {
     if (pollTimer) clearInterval(pollTimer);
     if (killTimer) clearTimeout(killTimer);
     if (attachTimer) clearTimeout(attachTimer);
+    stopFormPolling();
     activeRun?.kill('SIGTERM');
     activeRun = null;
     demoHandle?.stop();
@@ -651,6 +901,15 @@ async function runTui(mode, options) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
       app.setRunSession(parsed.sessionID);
       attachRoot(parsed.sessionID);
+      if (!formPollTimer && !formPollInFlight) startFormPolling();
+    }
+    for (const image of parsed.images ?? []) {
+      const key = image?.path ?? image?.url ?? image?.uri;
+      if (!key || seenImages.has(key)) continue;
+      seenImages.add(key);
+      const label = image.name || String(image.path || image.url || 'image').split(/[\\/]/).pop() || 'image';
+      app.addLog(`🖼 image: ${label}`);
+      app.openImage(image);
     }
     if (parsed.text) {
       lastText = parsed.text;
@@ -693,11 +952,13 @@ async function runTui(mode, options) {
 
   const finishTask = (result) => {
     activeRun = null;
+    stopFormPolling();
     if (killTimer) {
       clearTimeout(killTimer);
       killTimer = null;
     }
     if (stopped) return;
+    closeQuestionAtRunEnd();
     if (app.run.sessionID) {
       currentSessionID = app.run.sessionID;
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
@@ -750,6 +1011,7 @@ async function runTui(mode, options) {
   };
 
   const abortTask = () => {
+    stopFormPolling();
     if (!activeRun) {
       lineInput?.reset();
       app.setInputValue('');
@@ -772,7 +1034,7 @@ async function runTui(mode, options) {
    * report conflicts and persist state for /resume. Never a silent success —
    * every worker outcome is logged and surfaced on the agent pillars.
    */
-  const launchParallelRun = async (objective, token) => {
+  const launchParallelRun = async (objective, token, graphifyGuide = null) => {
     const concurrency = options.sequential ? 1 : (options.workers ?? 3);
     const runId = `run_${Date.now()}`;
 
@@ -854,6 +1116,7 @@ async function runTui(mode, options) {
       dir: options.dir,
       bin: options.opencode,
       auto: options.auto,
+      graphifyGuide,
     });
     const taskById = new Map(plan.map((t) => [t.id, t]));
     const agentOf = (taskId) => taskById.get(taskId)?.agent ?? 'other';
@@ -944,6 +1207,8 @@ async function runTui(mode, options) {
     } catch {}
 
     activeRun = null;
+    stopFormPolling();
+    closeQuestionAtRunEnd();
     const counts = manager.counts();
     const doneCount = counts.completed;
     const badCount = counts.failed + counts.cancelled;
@@ -1082,9 +1347,19 @@ async function runTui(mode, options) {
         app.openConfig(configSnapshot());
         return;
       }
-      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /config)`);
+      if (command === '/log') {
+        app.openLog('orchestrator');
+        return;
+      }
+      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /config, /log)`);
       return;
     }
+    stopFormPolling();
+    closeQuestionAtRunEnd();
+    questionRequest = null;
+    seenForms.clear();
+    seenImages.clear();
+    app.closeImage();
     lineInput?.reset();
     app.setInputValue('');
     if (pollTimer) {
@@ -1117,6 +1392,7 @@ async function runTui(mode, options) {
     }
     if (currentSessionID) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+      startFormPolling();
     }
     preparingRun = true;
     app.addLog(`▶ ${truncate(task, 110)}`);
@@ -1131,9 +1407,25 @@ async function runTui(mode, options) {
       const nolimit = await ensureNolimit();
       if (!nolimit.ok) {
         preparingRun = false;
+        stopFormPolling();
+        closeQuestionAtRunEnd();
         app.finishRun('error', nolimit.error);
         app.addLog(`! ${truncate(nolimit.error, 110)}`);
         return;
+      }
+    }
+    let launchTask = task;
+    let graphifyGuide = null;
+    if (options.graphify) {
+      const dir = options.dir || process.cwd();
+      const graph = ensureGraphify(dir);
+      if (graph.ok) {
+        app.addLog('graphify: graph ready');
+        launchTask = withGraphifyPrompt(task, dir);
+        graphifyGuide = graphifyPrompt(dir);
+      } else {
+        const error = truncate(graph.error ?? 'graph unavailable', 90);
+        app.addLog(`! graphify: ${error} — continuing without graph`);
       }
     }
     preparingRun = false;
@@ -1141,14 +1433,14 @@ async function runTui(mode, options) {
 
     // Parallel engine: plan + scheduler + independent workers (Phases 1–6).
     if (options.parallel || options.sequential) {
-      await launchParallelRun(task, token);
+      await launchParallelRun(task, token, graphifyGuide);
       return;
     }
 
     let handle;
     try {
       handle = launchRun({
-        task,
+        task: launchTask,
         model: options.model,
         fallbackModels: options.fallbackModels ?? [],
         auto: options.auto,
@@ -1163,6 +1455,7 @@ async function runTui(mode, options) {
           currentSessionID = id;
           savePersistedSession({ sessionID: id, dir: options.dir });
           app.setRunSession(id);
+          startFormPolling();
         },
         onEvent: (parsed) => {
           if (token === runToken && !stopped) handleParsed(parsed);
@@ -1174,6 +1467,8 @@ async function runTui(mode, options) {
       });
     } catch (error) {
       const message = error?.message ?? String(error);
+      stopFormPolling();
+      closeQuestionAtRunEnd();
       app.finishRun('error', message);
       app.addLog(`! ${truncate(message, 110)}`);
       return;
@@ -1184,6 +1479,23 @@ async function runTui(mode, options) {
 
   const onKey = (buffer) => {
     const text = buffer.toString('utf8');
+    // Questions consume every key first: in particular Esc cancels the form,
+    // never the underlying run. API actions stay asynchronous to rendering.
+    if (app.questionView.open) {
+      if (questionRequest) return;
+      const action = app.handleQuestionKey(buffer);
+      if (action?.action === 'reply') void answerQuestion(action.answer);
+      else if (action?.action === 'cancel') cancelQuestion();
+      else if (action?.action === 'external') openExternal(action.url);
+      return;
+    }
+    if (app.imageView.open) {
+      if (text === 'o' || text === 'O') {
+        const image = app.imageView.image;
+        openExternal(image?.path ?? image?.url ?? image?.uri);
+      } else if (text === '\x1b' || text === 'q' || text === 'Q') app.closeImage();
+      return;
+    }
     // Log overlay consumes keys first so Esc never aborts a run from inside it.
     if (app.logView.open) {
       if (text === '\x1b' || text === 'q' || text === 'Q') app.closeLog();
@@ -1207,9 +1519,11 @@ async function runTui(mode, options) {
       return;
     }
     if (mode === 'task') {
-      // Bare `l` opens the log only on an empty composer, so typing l
-      // mid-task still types.
-      if ((text === 'l' || text === 'L') && lineInput.value === '') {
+      // `/log` opens the log viewer even while a task is running. Bare `l` is
+      // no longer a shortcut here, so typing a task that starts with L works.
+      if ((text === '\r' || text === '\n') && lineInput.value.trim() === '/log') {
+        lineInput.reset();
+        app.setInputValue('');
         app.openLog('orchestrator');
         return;
       }

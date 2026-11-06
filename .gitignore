@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 parallel-state.json
+graphify-out/
 
 vendor/opencode-nolimit/data/keys.json
 .copilot/

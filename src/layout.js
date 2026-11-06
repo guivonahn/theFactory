@@ -131,8 +131,8 @@ export function buildLayout(width, height, options = {}) {
 
   const footerRows = Math.max(1, Math.min(3, options.footerRows ?? 1));
 
-  const boxWidth = Math.max(16, Math.min(24, Math.round(width * 0.25)));
-  const boxHeight = 5;
+  const boxWidth = Math.max(17, Math.min(28, Math.round(width * 0.27)));
+  const boxHeight = height < 34 ? 5 : height < 36 ? 6 : 7;
   const centerWidth = Math.min(44, Math.max(20, width - 2 * (boxWidth + 5)));
   const center = {
     row: Math.floor(height / 2) - 3,

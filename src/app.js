@@ -8,6 +8,12 @@ import { Canvas, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
 import { drawFactory } from '../workin_on/factory.js';
+import {
+  createQuestionState,
+  currentField,
+  fieldOptions,
+  handleQuestionKey as handleFormKey,
+} from './forms.js';
 
 const T = themeFor('dark'); // terminalThemes.dark tokens (exact JSON hex)
 const GRAY = APPLE_UIKIT.dark.system;
@@ -18,11 +24,14 @@ const STEP_MS = 16;
 /** Config overlay rows in display order; editable rows respond to enter/arrows. */
 const CONFIG_ROWS = [
   { key: 'model', label: 'model', editable: true },
+  { key: 'profile', label: 'profile', editable: true },
+  { key: 'verbose', label: 'verbose', editable: true },
   { key: 'fallbacks', label: 'fallbacks', editable: true },
   { key: 'auto', label: 'auto', editable: true },
   { key: 'parallel', label: 'parallel', editable: true },
   { key: 'sequential', label: 'sequential', editable: true },
   { key: 'nolimit', label: 'nolimit', editable: true },
+  { key: 'graphify', label: 'graphify', editable: true },
   { key: 'dir', label: 'dir', editable: false },
   { key: 'session', label: 'session', editable: false },
 ];
@@ -86,6 +95,8 @@ export class App {
     this.centerLog = [];
     this.logView = { open: false, agentKey: 'orchestrator', scroll: 0 };
     this.configView = { open: false, selected: 'model', info: {} };
+    this.imageView = { open: false, image: null };
+    this.questionView = { open: false };
     this.inputValue = '';
     this.run = {
       state: 'idle',
@@ -179,6 +190,34 @@ export class App {
   /** Close the config overlay. */
   closeConfig() {
     this.configView.open = false;
+  }
+
+  /** Open a pending OpenCode form without coupling the view to API transport. */
+  openQuestion(form, { sessionID } = {}) {
+    this.questionView = createQuestionState(form, sessionID);
+    return this.questionView;
+  }
+
+  closeQuestion() {
+    this.questionView = { open: false };
+  }
+
+  setQuestionError(message) {
+    if (this.questionView.open) this.questionView.error = String(message ?? 'question reply failed');
+  }
+
+  handleQuestionKey(buffer) {
+    if (!this.questionView.open) return null;
+    return handleFormKey(this.questionView, buffer);
+  }
+
+  openImage(image) {
+    if (!image || typeof image !== 'object') return;
+    this.imageView = { open: true, image };
+  }
+
+  closeImage() {
+    this.imageView.open = false;
   }
 
   /** Cycle through orchestrator + 6 pillars + other. dir is ±1. */
@@ -666,8 +705,8 @@ export class App {
 
   _drawStatus() {
     const idleTaskHint = this.run.state === 'running'
-      ? ' · esc abort'
-      : ' · /sessions pick · /new fresh · l log';
+      ? ' · esc abort · /log log'
+      : ' · /sessions pick · /new fresh · /log log';
     const prefix = this.inputMode
       ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}`
       : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit`;
@@ -727,11 +766,14 @@ export class App {
     const info = this.configView.info ?? {};
     const values = {
       model: info.model || '(default)',
+      profile: info.profile || '(default)',
+      verbose: info.verbosity ? info.verbosity.toUpperCase() : '(default)',
       fallbacks: info.fallbackModels?.length ? info.fallbackModels.join(', ') : '(none)',
       auto: info.auto ? 'ON' : 'OFF',
       parallel: info.parallel ? `${info.workers || 3} workers` : 'OFF',
       sequential: info.sequential ? 'ON' : 'OFF',
       nolimit: info.nolimit ? 'ON' : 'OFF',
+      graphify: info.graphify ? 'ON' : 'OFF',
       dir: info.dir || process.cwd(),
       session: info.session || '(new on next task)',
     };
@@ -766,6 +808,95 @@ export class App {
     });
   }
 
+  /** Paint the most recently detected image (Apple Terminal shows its path). */
+  _drawImage() {
+    if (!this.imageView.open || !this.imageView.image) return;
+    const image = this.imageView.image;
+    const target = image.path ?? image.url ?? image.uri ?? '(unknown target)';
+    const lines = [
+      { text: image.name || 'image', color: T.textPrimary },
+      { text: `mime: ${image.mime || 'unknown'}`, color: T.textSecondary },
+      { text: String(target), color: T.textSecondary },
+      { text: 'o open externally · esc close', color: T.textPrimary },
+    ];
+    const boxWidth = Math.min(
+      this.width - 4,
+      Math.max(40, Math.min(76, Math.max(...lines.map((line) => line.text.length)) + 6)),
+    );
+    const boxHeight = lines.length + 2;
+    const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
+    const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
+    this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
+    this.canvas.box(row, col, boxWidth, boxHeight, T.textPrimary, 'IMAGE');
+    lines.forEach((line, index) => {
+      this.canvas.write(row + 1 + index, col + 2, truncate(line.text, boxWidth - 4), line.color);
+    });
+  }
+
+  /** Paint the pending OpenCode question form above every other overlay. */
+  _drawQuestion() {
+    if (!this.questionView.open) return;
+    const state = this.questionView;
+    const field = currentField(state);
+    if (!field) return;
+    const options = fieldOptions(state);
+    const body = [];
+    const progress = state.fields.length > 1 ? ` · field ${state.fieldIndex + 1}/${state.fields.length}` : '';
+    body.push({ text: `${state.form?.title || 'OpenCode question'}${progress}`, color: T.textPrimary });
+    body.push({ text: field.title || field.key || field.type || 'Question', color: T.textPrimary });
+    if (field.description) body.push({ text: String(field.description), color: T.textSecondary });
+
+    options.forEach((option, index) => {
+      const cursor = index === state.optionIndex && !state.custom ? '›' : ' ';
+      const checkbox = field.type === 'multiselect'
+        ? `${state.selected?.includes(option.value) ? '[x]' : '[ ]'} `
+        : '';
+      const description = option.description ? ` — ${option.description}` : '';
+      body.push({
+        text: `${cursor} ${checkbox}${option.label ?? option.value}${description}`,
+        color: index === state.optionIndex && !state.custom ? T.textPrimary : T.textSecondary,
+      });
+    });
+
+    const customRow = options.length > 0 && (field.custom === true || field.type === 'string');
+    if (customRow) {
+      body.push({
+        text: `${state.custom ? '›' : ' '} your answer: ${state.buffer}${state.custom ? '▌' : ''}`,
+        color: state.custom ? T.textPrimary : T.textSecondary,
+      });
+    } else if (options.length === 0 && ['string', 'number', 'integer'].includes(field.type)) {
+      body.push({ text: `answer: ${state.buffer}▌`, color: T.textPrimary });
+    }
+
+    if (field.type === 'boolean') {
+      body.push({ text: `value: ${state.buffer} · y/n/space/←/→`, color: T.textPrimary });
+    } else if (field.type === 'multiselect') {
+      body.push({ text: 'space toggle selected options', color: T.textSecondary });
+    } else if (field.type === 'external') {
+      body.push({ text: `${field.url ?? field.uri ?? field.href ?? ''} · o open externally`, color: T.textSecondary });
+    }
+
+    const hint = '↑/↓ choose · ↵ submit · esc cancel · type for your own answer';
+    const allLines = [...body, ...(state.error ? [{ text: state.error, color: T.error }] : []), { text: hint, color: T.textPrimary }];
+    const boxWidth = Math.min(
+      this.width - 4,
+      Math.max(44, Math.min(78, Math.max(...allLines.map((line) => line.text.length)) + 6)),
+    );
+    const boxHeight = Math.min(this.height - 4, allLines.length + 2);
+    const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
+    const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
+    this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
+    this.canvas.box(row, col, boxWidth, boxHeight, T.textPrimary, 'QUESTION');
+
+    const contentRows = boxHeight - 2;
+    const extraRows = 1 + (state.error ? 1 : 0);
+    const visibleBody = body.slice(0, Math.max(0, contentRows - extraRows));
+    const lines = [...visibleBody, ...(state.error ? [{ text: state.error, color: T.error }] : []), { text: hint, color: T.textPrimary }];
+    lines.slice(0, contentRows).forEach((line, index) => {
+      this.canvas.write(row + 1 + index, col + 2, truncate(line.text, boxWidth - 4), line.color);
+    });
+  }
+
   /** Paint the current state into the back buffer. */
   draw() {
     if (this.layout.tooSmall) return;
@@ -780,6 +911,8 @@ export class App {
     this._drawStatus();
     this._drawLog();
     this._drawConfig();
+    this._drawImage();
+    this._drawQuestion();
   }
 
   /** Paint and return the diffed ANSI frame. */

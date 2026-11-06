@@ -14,7 +14,7 @@ import { createEventBus } from './events.js';
 
 let workerSeq = 0;
 
-export function buildWorkerPrompt({ objective, task, artifacts = [] } = {}) {
+export function buildWorkerPrompt({ objective, task, artifacts = [], graphifyGuide = null } = {}) {
   const parts = [
     `Objective: ${objective ?? task?.title ?? ''}`,
     `Task: ${task?.title ?? ''} (${task?.id ?? ''})`,
@@ -23,6 +23,7 @@ export function buildWorkerPrompt({ objective, task, artifacts = [] } = {}) {
   if (task?.files?.length) parts.push(`Scope: ${task.files.join(', ')}`);
   if (artifacts.length) parts.push(`Inputs: ${artifacts.join(', ')}`);
   parts.push('Do only the assigned task. Do not edit outside your workspace.');
+  if (graphifyGuide) parts.push(graphifyGuide);
   return parts.join('\n');
 }
 
@@ -54,7 +55,12 @@ export function createWorkerManager(options = {}) {
     workers.set(id, record);
     bus.publish({ runId: record.runId, workerId: id, taskId: task.id, kind: 'assigned', text: `${role}:${task.id} assigned` });
 
-    const prompt = buildWorkerPrompt({ objective, task, artifacts });
+    const prompt = buildWorkerPrompt({
+      objective,
+      task,
+      artifacts,
+      graphifyGuide: options.graphifyGuide,
+    });
     const handle = launchRun({
       task: prompt,
       agent: role,

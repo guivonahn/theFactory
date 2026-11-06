@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { resolveAgent } from './agents.js';
+import { imagesFromPart } from './media.js';
 
 const STDERR_TAIL = 2000;
 
@@ -58,7 +59,16 @@ export function parseRunLine(line) {
     error: null,
     permission: null,
     events: [],
+    images: [],
   };
+
+  // Detect images before any event-specific early return. Tool output is
+  // external data, so malformed metadata must never make JSONL parsing fail.
+  try {
+    result.images = imagesFromPart(part, { text: part.text ?? data.text });
+  } catch {
+    result.images = [];
+  }
 
   // Future-proof permission-request signal: handle explicitly so it is never
   // dropped silently. `opencode run --format json` currently reports ask

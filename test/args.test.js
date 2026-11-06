@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, parseModelList } from '../src/main.js';
+import { parseArgs, parseModelList, cycleConfigValue } from '../src/main.js';
 
 test('parseArgs handles the task-mode flags', () => {
   const options = parseArgs([
@@ -85,4 +85,37 @@ test('parseArgs fallback selector parses CSV (bounded 8)', () => {
   assert.deepEqual(parseArgs(['--fallback-models', 'a,b']).fallbackModels, ['a', 'b']);
   assert.deepEqual(parseArgs(['--fallback-models', 'x']).fallbackModels, ['x']);
   assert.equal(parseModelList(Array.from({ length: 20 }, (_, i) => `m${i}`).join(',')).length, 8);
+});
+
+test('parseArgs supports profile (including free) and verbosity', () => {
+  assert.equal(parseArgs(['--task']).profile, null);
+  assert.equal(parseArgs(['--task']).verbosity, null);
+  assert.equal(parseArgs(['--profile', 'free']).profile, 'free');
+  assert.equal(parseArgs(['--profile', 'high']).profile, 'high');
+  assert.equal(parseArgs(['--verbosity', 'low']).verbosity, 'low');
+  assert.equal(parseArgs(['--verbosity', 'medium']).verbosity, 'medium');
+  assert.equal(parseArgs(['--verbosity', 'high']).verbosity, 'high');
+  assert.throws(() => parseArgs(['--profile', 'turbo']), /low, medium, high, or free/);
+  assert.throws(() => parseArgs(['--verbosity', 'turbo']), /--verbosity expects low, medium, or high/);
+  assert.throws(() => parseArgs(['--verbosity']), /Missing value for --verbosity/);
+});
+
+test('cycleConfigValue cycles verbosity and profile through (default)', () => {
+  const options = { verbosity: null, profile: null };
+  assert.equal(cycleConfigValue(options, 'verbose', 1), 'LOW');
+  assert.equal(options.verbosity, 'low');
+  assert.equal(cycleConfigValue(options, 'verbose', 1), 'MEDIUM');
+  assert.equal(cycleConfigValue(options, 'verbose', 1), 'HIGH');
+  assert.equal(cycleConfigValue(options, 'verbose', 1), '(default)');
+  assert.equal(options.verbosity, null);
+  assert.equal(cycleConfigValue(options, 'verbose', -1), 'HIGH');
+
+  assert.equal(cycleConfigValue(options, 'profile', 1), 'LOW');
+  assert.equal(cycleConfigValue(options, 'profile', 1), 'MEDIUM');
+  assert.equal(cycleConfigValue(options, 'profile', 1), 'HIGH');
+  assert.equal(cycleConfigValue(options, 'profile', 1), 'FREE');
+  assert.equal(options.profile, 'free');
+  assert.equal(cycleConfigValue(options, 'profile', 1), '(default)');
+  assert.equal(options.profile, null);
+  assert.equal(cycleConfigValue(options, 'profile', -1), 'FREE');
 });
