@@ -1188,12 +1188,15 @@ async function runTui(mode, options) {
         const summary = truncate(String(record?.output ?? '').trim() || 'done', 90);
         app.addLog(`✓ ${agent}: ${summary}`);
         app.applyEvent({ kind: 'msg', dir: 'in', from: agent, text: record?.output ?? 'done' });
+        // msg-in flips the pillar back to "working"; settle it explicitly so
+        // the ACTIVE AGENTS panel drops it when the task is finished.
+        app.applyEvent({ kind: 'status', from: agent, text: 'done', state: 'done' });
       } else if (evt.kind === 'failed' || evt.kind === 'cancelled') {
         refreshPanel();
         const record = manager.workers.get(evt.workerId);
         const detail = truncate(String(record?.error ?? evt.text ?? evt.kind), 90);
         app.addLog(`✗ ${agent}: ${detail}`);
-        app.applyEvent({ kind: 'status', from: agent, text: `✗ ${detail}` });
+        app.applyEvent({ kind: 'status', from: agent, text: `✗ ${detail}`, state: 'idle' });
       } else if (evt.kind === 'tool') {
         app.applyEvent({ kind: 'tool', from: agent, text: evt.text });
       } else if (evt.kind === 'permission') {

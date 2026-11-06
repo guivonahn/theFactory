@@ -352,10 +352,38 @@ export class App {
     return Math.max(0, Math.floor(this.run.duration / 1000));
   }
 
+  /** Reset every agent still marked working back to a settled state. */
+  settleWorkingAgents(status = 'done') {
+    for (const state of this.agents.values()) {
+      if (state.status === 'working') {
+        state.status = status === 'idle' ? 'idle' : 'done';
+        if (state.status === 'done') state.flashUntil = this.now + 500;
+      }
+    }
+  }
+
+  /** Set one agent's status explicitly (used by the parallel bus). */
+  setAgentStatus(name, status) {
+    const key = this._agentKey(name);
+    const state = this.agents.get(key);
+    if (!state) return;
+    if (status === 'done') {
+      state.status = 'done';
+      state.flashUntil = this.now + 500;
+    } else if (status === 'idle') {
+      state.status = 'idle';
+    } else if (status === 'working') {
+      state.status = 'working';
+    }
+  }
+
   /** Mark the current run done, aborted or failed. */
   finishRun(state, detail = '') {
     const duration = this.run.startedAt ? Math.max(0, this.now - this.run.startedAt) : 0;
     this.run = { ...this.run, state, duration, detail: clean(detail) };
+    // A finished run must clear the ACTIVE AGENTS panel; otherwise pillars
+    // fed by live worker messages stay stuck on spinner-forever "working".
+    this.settleWorkingAgents(state === 'done' ? 'done' : 'idle');
     if (state === 'done') {
       const suffix = this.run.detail ? ` · ${truncate(this.run.detail, 56)}` : '';
       this.activity = `✓ task complete in ${Math.max(1, Math.floor(duration / 1000))}s${suffix}`;
@@ -536,11 +564,21 @@ export class App {
     if (key === 'other') this.showOther = true;
     if (text) this._pushHistory(state, { dir: 'status', text, kind: 'status', at: this.now });
     const lowered = text.toLowerCase();
-    if (lowered.includes('done') || lowered.includes('complete') || lowered.includes('finish') || event.state === 'done') {
+    // Explicit terminal state wins first, then keyword heuristics. Failure
+    // keywords must settle to idle — previously any unknown status text fell
+    // through to "working", so "✗ failed" left the agent spinning forever.
+    if (event.state === 'done' || lowered.includes('done') || lowered.includes('complete') || lowered.includes('finish')) {
       state.status = 'done';
       state.flashUntil = this.now + 500;
-    } else if (lowered.includes('idle') || event.state === 'idle') {
+    } else if (
+      event.state === 'idle' || lowered.includes('idle') ||
+      lowered.includes('✗') || lowered.includes('fail') ||
+      lowered.includes('error') || lowered.includes('cancel') ||
+      lowered.includes('abort')
+    ) {
       state.status = 'idle';
+    } else if (event.state === 'working') {
+      state.status = 'working';
     } else {
       state.status = 'working';
     }
