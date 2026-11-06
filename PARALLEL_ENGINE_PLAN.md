@@ -23,6 +23,15 @@ This document is a checkpoint, not completion. Only pieces listed as Done are im
 
 ## Done
 - DAG task model + validator (dup/missing/cycle/self-dep) — `src/scheduler.js`.
+- **Wiring (TUI task path)**: planner + dispatch live in `startTask`. `--parallel /
+  --workers N / --sequential` now run the full Phase 1–6 flow per run:
+  `src/plan.js` (buildPlanningPrompt → orchestrator model → parsePlan via
+  validateTasks, with a single-task fallback), scheduler `runTasks` executing
+  ready tasks concurrently through `src/worker.js` (independent `opencode run`
+  processes, per-worker session ids), outcome events mapped onto the TUI lanes
+  and worker panel, `src/integrate.js` conflict report, and
+  `saveParallelState` snapshot for `--resume <dir>`. Abort (Esc) kills the
+  planner child, then cancels running workers (late SIGKILL stays in place).
 - State machine pending/ready/running/completed/failed/blocked/cancelled,
   deterministic priority+order dispatch, concurrency cap (default 3),
   no duplicate dispatch, failure→blocked propagation, capped retries, sequential mode,

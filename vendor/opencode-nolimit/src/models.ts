@@ -36,10 +36,10 @@ export interface PublicModel {
 // if the opencode CLI is ever unavailable.
 const SEED_MODELS: PublicModel[] = [
   {
-    id: "deepseek-v4-flash-free",
-    label: "DeepSeek V4 Flash (Free)",
-    reliability: "rate-limited",
-    backend: { providerID: "opencode", modelID: "deepseek-v4-flash-free" },
+    id: "beam-free",
+    label: "Beam (Free)",
+    reliability: "intermittent",
+    backend: { providerID: "opencode", modelID: "beam-free" },
   },
   {
     id: "big-pickle",
@@ -48,16 +48,34 @@ const SEED_MODELS: PublicModel[] = [
     backend: { providerID: "opencode", modelID: "big-pickle" },
   },
   {
-    id: "hy3-free",
-    label: "Hy3 (Free)",
-    reliability: "solid",
-    backend: { providerID: "opencode", modelID: "hy3-free" },
+    id: "crouton-alpha-free",
+    label: "Crouton Alpha (Free)",
+    reliability: "intermittent",
+    backend: { providerID: "opencode", modelID: "crouton-alpha-free" },
   },
   {
-    id: "laguna-s-2.1-free",
-    label: "Laguna S 2.1 (Free)",
+    id: "deepseek-v4.1-flash-free",
+    label: "DeepSeek V4.1 Flash (Free)",
+    reliability: "rate-limited",
+    backend: { providerID: "opencode", modelID: "deepseek-v4.1-flash-free" },
+  },
+  {
+    id: "flint-40b-free",
+    label: "Flint 40B (Free)",
+    reliability: "intermittent",
+    backend: { providerID: "opencode", modelID: "flint-40b-free" },
+  },
+  {
+    id: "glm-5.3-flash-free",
+    label: "GLM 5.3 Flash (Free)",
     reliability: "solid",
-    backend: { providerID: "opencode", modelID: "laguna-s-2.1-free" },
+    backend: { providerID: "opencode", modelID: "glm-5.3-flash-free" },
+  },
+  {
+    id: "mimo-v2.6-flash-free",
+    label: "MiniMax M2.6 Flash (Free)",
+    reliability: "rate-limited",
+    backend: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
   },
   {
     id: "nemotron-3.5-lightning-free",
@@ -66,22 +84,16 @@ const SEED_MODELS: PublicModel[] = [
     backend: { providerID: "opencode", modelID: "nemotron-3.5-lightning-free" },
   },
   {
-    id: "mimo-v2.5-free",
-    label: "MiniMax M2.5 (Free)",
-    reliability: "rate-limited",
-    backend: { providerID: "opencode", modelID: "mimo-v2.5-free" },
+    id: "nemotron-3.5-super-vl-free",
+    label: "Nemotron 3.5 Super VL (Free)",
+    reliability: "intermittent",
+    backend: { providerID: "opencode", modelID: "nemotron-3.5-super-vl-free" },
   },
   {
-    id: "nemotron-3-ultra-free",
-    label: "Nemotron 3 Ultra (Free)",
+    id: "pulse-alpha-free",
+    label: "Pulse Alpha (Free)",
     reliability: "intermittent",
-    backend: { providerID: "opencode", modelID: "nemotron-3-ultra-free" },
-  },
-  {
-    id: "ling-3.0-tiny-free",
-    label: "Ling 3.0 Tiny (Free)",
-    reliability: "intermittent",
-    backend: { providerID: "opencode", modelID: "ling-3.0-tiny-free" },
+    backend: { providerID: "opencode", modelID: "pulse-alpha-free" },
   },
 ];
 
@@ -169,6 +181,23 @@ export function parseModelsOutput(stdout: string): RawModel[] {
   return models;
 }
 
+/**
+ * Current `opencode models` no longer accepts the old
+ * `opencode --refresh --verbose` arguments and prints a plain `opencode/<id>`
+ * list without cost JSON. Free tier is inferred from the id itself: the
+ * `-free` suffix, plus the legacy `big-pickle` deepseek alias.
+ */
+function parsePlainModelLines(stdout: string): RawModel[] {
+  const models: RawModel[] = [];
+  for (const line of stdout.split("\n")) {
+    const m = line.trim().match(/^opencode\/([\w.-]+)$/);
+    if (!m) continue;
+    const id = m[1];
+    if (id === "big-pickle" || id.endsWith("-free")) models.push({ id });
+  }
+  return models;
+}
+
 function reliabilityFor(id: string, status?: string): PublicModel["reliability"] {
   return RELIABILITY_HINTS[id] ?? (status === "active" ? "solid" : "intermittent");
 }
@@ -188,8 +217,10 @@ export async function refreshModels(): Promise<PublicModel[]> {
 
   refreshing = (async () => {
     const bin = resolveBinary();
+    // `opencode models` takes no positional provider arg and no --refresh /
+    // --verbose flags anymore; plain listing only (see parsePlainModelLines).
     const proc = spawn({
-      cmd: [bin, "models", "opencode", "--refresh", "--verbose"],
+      cmd: [bin, "models"],
       stdout: "pipe",
       // stderr is not consumed — dropping it avoids a pipe-buffer deadlock.
       stderr: "ignore",
@@ -212,17 +243,18 @@ export async function refreshModels(): Promise<PublicModel[]> {
       }
 
       const raw = parseModelsOutput(stdout);
-      const fresh = raw
-        .filter((m) => m.cost?.input === 0 && m.cost?.output === 0)
-        .map(
-          (m): PublicModel => ({
-            id: m.id,
-            label: m.name || m.id,
-            backend: { providerID: "opencode", modelID: m.id },
-            reliability: reliabilityFor(m.id, m.status),
-            cost: { input: 0, output: 0 },
-          }),
-        );
+      // Verbose JSON blocks (old CLI) carry cost == 0 for free models; the
+      // current plain listing instead flags the free tier in the id itself.
+      const fromVerbose = raw.filter((m) => m.cost?.input === 0 && m.cost?.output === 0);
+      const fresh = (fromVerbose.length ? fromVerbose : parsePlainModelLines(stdout)).map(
+        (m): PublicModel => ({
+          id: m.id,
+          label: m.name || m.id,
+          backend: { providerID: "opencode", modelID: m.id },
+          reliability: reliabilityFor(m.id, m.status),
+          cost: { input: 0, output: 0 },
+        }),
+      );
 
       if (fresh.length === 0) throw new Error("no free (cost 0) models found");
       cache = fresh;

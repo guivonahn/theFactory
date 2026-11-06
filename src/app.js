@@ -7,12 +7,25 @@ import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './a
 import { Canvas, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
+import { drawFactory } from '../workin_on/factory.js';
 
 const T = themeFor('dark'); // terminalThemes.dark tokens (exact JSON hex)
 const GRAY = APPLE_UIKIT.dark.system;
 
 const PACKET_SPEED = 0.018; // cells per millisecond
 const STEP_MS = 16;
+
+/** Config overlay rows in display order; editable rows respond to enter/arrows. */
+const CONFIG_ROWS = [
+  { key: 'model', label: 'model', editable: true },
+  { key: 'fallbacks', label: 'fallbacks', editable: true },
+  { key: 'auto', label: 'auto', editable: true },
+  { key: 'parallel', label: 'parallel', editable: true },
+  { key: 'sequential', label: 'sequential', editable: true },
+  { key: 'nolimit', label: 'nolimit', editable: true },
+  { key: 'dir', label: 'dir', editable: false },
+  { key: 'session', label: 'session', editable: false },
+];
 
 function freshAgent(def) {
   return {
@@ -66,11 +79,13 @@ export class App {
     this.totalMessages = 0;
     this.totalTools = 0;
     this.totalTokens = 0;
+    this.totalKb = 0;
     this.activity = 'awaiting first task…';
     this.centerFlashUntil = 0;
     this.centerFlashColor = T.textPrimary;
     this.centerLog = [];
     this.logView = { open: false, agentKey: 'orchestrator', scroll: 0 };
+    this.configView = { open: false, selected: 'model', info: {} };
     this.inputValue = '';
     this.run = {
       state: 'idle',
@@ -136,6 +151,34 @@ export class App {
   /** Close the log overlay. */
   closeLog() {
     this.logView.open = false;
+  }
+
+  /** Open the config overlay with a snapshot of the current settings. */
+  openConfig(info = {}) {
+    this.configView.info = { ...info };
+    this.configView.selected = 'model';
+    this.configView.open = true;
+  }
+
+  /** Update the config overlay's settings snapshot without opening/closing it. */
+  updateConfigInfo(info = {}) {
+    if (!this.configView.open) return;
+    this.configView.info = { ...info };
+  }
+
+  /** Move the config cursor to the previous/next editable row. dir is ±1. */
+  moveConfigSelection(dir) {
+    const editable = CONFIG_ROWS.filter((row) => row.editable);
+    if (editable.length === 0) return;
+    let index = editable.findIndex((row) => row.key === this.configView.selected);
+    if (index < 0) index = dir < 0 ? editable.length - 1 : 0;
+    else index = (index + (dir < 0 ? -1 : 1) + editable.length) % editable.length;
+    this.configView.selected = editable[index].key;
+  }
+
+  /** Close the config overlay. */
+  closeConfig() {
+    this.configView.open = false;
   }
 
   /** Cycle through orchestrator + 6 pillars + other. dir is ±1. */
@@ -289,10 +332,13 @@ export class App {
 
   _spawn(path, color, options = {}) {
     const size = options.size ?? ((path.length % 3) + 1);
+    // One little node per KB of payload (capped so 12 MB doesn't stall the path).
+    const nodes = Math.max(1, Math.min(12, Math.ceil((options.bytes ?? 1024) / 1024)));
     this.packets.push({
       path,
       color,
       size,
+      nodes,
       progress: 0,
       speed: options.speed ?? PACKET_SPEED,
       startAt: this.now + (options.delay ?? 0),
@@ -326,6 +372,8 @@ export class App {
     this._pushHistory(state, { dir, text, kind: 'msg', at: this.now });
     this.totalMessages += 1;
     this.totalTokens += Math.max(1, Math.ceil(text.length / 4));
+    // Real payload size in bytes drives the KB node count downstream.
+    const bytes = event.bytes ?? Buffer.byteLength(text, 'utf8');
     state.status = 'working';
 
     const verb = dir === 'out' ? '→' : '←';
@@ -333,8 +381,10 @@ export class App {
 
     const slot = this._slotFor(key);
     if (!slot) return;
-    const path = dir === 'out' ? slot.path : [...slot.path].reverse();
-    this._spawn(path, state.def.color, { agentKey: key, dir });
+    this.totalKb += bytes / 1024;
+    // Out rides the outbound lane; the reply rides the return lane.
+    const path = dir === 'out' ? slot.path : [...(slot.returnPath ?? slot.path)].reverse();
+    this._spawn(path, state.def.color, { agentKey: key, dir, bytes });
   }
 
   _applyTool(event) {
@@ -342,6 +392,7 @@ export class App {
     if (key === 'orchestrator') {
       const detail = clean(event.text);
       this.totalTools += 1;
+      this.totalKb += 1;
       this.centerFlashUntil = this.now + 220;
       this.activity = `tool: ${detail || 'running tool'}`;
       if (!event.fanout) return;
@@ -356,6 +407,7 @@ export class App {
           delay: index * 55,
           speed: 0.04,
           size: 2,
+          bytes: 1024,
         });
       });
       return;
@@ -367,6 +419,7 @@ export class App {
     state.status = 'working';
     state.pulseUntil = this.now + 1000;
     this.totalTools += 1;
+    this.totalKb += 1;
     const detail = clean(event.text);
     this._pushHistory(state, { dir: 'tool', text: detail || 'running tool', kind: 'tool', at: this.now });
     this.activity = `${state.def.label.toLowerCase()}: ${detail || 'running tool'}`;
@@ -375,13 +428,15 @@ export class App {
     if (!slot) return;
     for (let i = 0; i < 4; i += 1) {
       const outbound = i % 2 === 0;
-      const path = outbound ? slot.path : [...slot.path].reverse();
-      this._spawn(path, state.def.color, {
+      // Alternates out / back across the two lanes (ping-pong data flow).
+      const lane = outbound ? slot.path : [...(slot.returnPath ?? slot.path)].reverse();
+      this._spawn(lane, state.def.color, {
         agentKey: key,
         dir: outbound ? 'out' : 'in',
         delay: i * 130,
         speed: 0.055,
         size: 1,
+        bytes: 1024,
       });
     }
   }
@@ -451,29 +506,31 @@ export class App {
   _drawBranches() {
     for (const [key, slot] of this._slots) {
       if (key === 'other' && !this.showOther) continue;
-      const path = slot.path;
-      for (let index = 0; index < path.length; index += 1) {
-        const cell = path[index];
-        const prev = path[index - 1];
-        const next = path[index + 1];
-        let glyph = '─';
-        if (prev && next) {
-          if (prev.row === cell.row && next.row === cell.row) glyph = '─';
-          else if (prev.col === cell.col && next.col === cell.col) glyph = '│';
-          else glyph = '+';
-        } else if (next) {
-          glyph = next.row === cell.row ? '─' : '│';
-        } else if (prev) {
-          glyph = prev.row === cell.row ? '─' : '│';
+      // Two-way flux: one lane going out, one coming back.
+      for (const path of [slot.path, slot.returnPath]) {
+        for (let index = 0; index < path.length; index += 1) {
+          const cell = path[index];
+          const prev = path[index - 1];
+          const next = path[index + 1];
+          let glyph = '─';
+          if (prev && next) {
+            if (prev.row === cell.row && next.row === cell.row) glyph = '─';
+            else if (prev.col === cell.col && next.col === cell.col) glyph = '│';
+            else glyph = '+';
+          } else if (next) {
+            glyph = next.row === cell.row ? '─' : '│';
+          } else if (prev) {
+            glyph = prev.row === cell.row ? '─' : '│';
+          }
+          this.canvas.put(cell.row, cell.col, glyph, T.border);
         }
-        this.canvas.put(cell.row, cell.col, glyph, T.border);
       }
 
       const state = this.agents.get(key);
       if (state && state.pulseUntil > this.now) {
-        const count = Math.min(6, path.length);
+        const count = Math.min(6, slot.path.length);
         for (let offset = 1; offset <= count; offset += 1) {
-          const cell = path[path.length - offset];
+          const cell = slot.path[slot.path.length - offset];
           const lit = (Math.floor(this.now / 110) + offset) % 2 === 0;
           this.canvas.put(cell.row, cell.col, lit ? '●' : '·', state.def.color);
         }
@@ -512,7 +569,7 @@ export class App {
     this.canvas.write(
       box.row + 4,
       box.col + 2,
-      truncate(`msgs ${this.totalMessages} · tools ${this.totalTools} · ~tok ${this.totalTokens}`, inner - 2),
+      truncate(`msgs ${this.totalMessages} · tools ${this.totalTools} · ${Math.round(this.totalKb)}kb`, inner - 2),
       GRAY.gray2,
     );
     this.canvas.write(
@@ -569,6 +626,17 @@ export class App {
       this.canvas.put(cell.row, cell.col, glyph, packet.color);
       const trail = packet.path[index - 1];
       if (trail) this.canvas.put(trail.row, trail.col, '·', packet.color);
+      // One little node per KB: trail behind the head, spread to fit the path.
+      const count = Math.max(0, (packet.nodes ?? 1) - 1);
+      if (count > 0) {
+        const span = Math.min(2, Math.max(1, Math.floor((index) / Math.max(1, count + 1))));
+        for (let node = 1; node <= count; node += 1) {
+          const nodeIndex = index - node * span;
+          if (nodeIndex < 0) break;
+          const nodeCell = packet.path[nodeIndex];
+          this.canvas.put(nodeCell.row, nodeCell.col, '·', packet.color);
+        }
+      }
     }
   }
 
@@ -653,16 +721,65 @@ export class App {
     );
   }
 
+  /** Paint the config overlay on top of everything (only when open). */
+  _drawConfig() {
+    if (!this.configView.open) return;
+    const info = this.configView.info ?? {};
+    const values = {
+      model: info.model || '(default)',
+      fallbacks: info.fallbackModels?.length ? info.fallbackModels.join(', ') : '(none)',
+      auto: info.auto ? 'ON' : 'OFF',
+      parallel: info.parallel ? `${info.workers || 3} workers` : 'OFF',
+      sequential: info.sequential ? 'ON' : 'OFF',
+      nolimit: info.nolimit ? 'ON' : 'OFF',
+      dir: info.dir || process.cwd(),
+      session: info.session || '(new on next task)',
+    };
+    const labelWidth = Math.max(...CONFIG_ROWS.map((row) => row.label.length));
+    const lines = CONFIG_ROWS.map((row) => {
+      const cursor = row.key === this.configView.selected ? '›' : ' ';
+      const suffix = row.editable ? '' : '  (read-only)';
+      return `${cursor} ${row.label.padEnd(labelWidth)}  ${values[row.key]}${suffix}`;
+    });
+    const boxWidth = Math.max(36, Math.min(this.width - 4, Math.max(...lines.map((line) => line.length)) + 6));
+    const boxHeight = lines.length + 4;
+    const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
+    const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
+    // Clear the overlay so the underlying frame does not bleed through.
+    this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
+    this.canvas.box(row, col, boxWidth, boxHeight, T.border, 'theFactory Configuration');
+    this.canvas.write(
+      row + 1,
+      col + 2,
+      truncate('↑/↓ select · ↵/→ change · ← previous · q/esc close', boxWidth - 4),
+      T.textSecondary,
+    );
+    lines.forEach((line, index) => {
+      const def = CONFIG_ROWS[index];
+      const selected = def.key === this.configView.selected;
+      const color = !def.editable
+        ? T.textMuted
+        : selected
+          ? T.textPrimary
+          : T.textSecondary;
+      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), color);
+    });
+  }
+
   /** Paint the current state into the back buffer. */
   draw() {
     if (this.layout.tooSmall) return;
     this.canvas.clear();
+    // theFactory skyline: baked first so overlays cover it; animated whenever
+    // agents are working (src hook -> workin_on/factory.js).
+    drawFactory(this);
     this._drawBranches();
     this._drawCenter();
     this._drawAgents();
     this._drawPackets();
     this._drawStatus();
     this._drawLog();
+    this._drawConfig();
   }
 
   /** Paint and return the diffed ANSI frame. */

@@ -1,5 +1,6 @@
 node_modules/
 .DS_Store
+parallel-state.json
 
 vendor/opencode-nolimit/data/keys.json
 .copilot/

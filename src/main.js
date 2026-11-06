@@ -14,12 +14,21 @@ import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
 import { launchRun } from './run.js';
+import { runTasks } from './scheduler.js';
+import { createWorkerManager } from './worker.js';
+import { detectConflicts } from './integrate.js';
+import {
+  buildPlanningPrompt,
+  parsePlan,
+  fallbackPlan,
+} from './plan.js';
+import { saveParallelState } from './parallelState.js';
 import {
   clearPersistedSession,
   loadPersistedSession,
   savePersistedSession,
 } from './sessionState.js';
-import { ensureNolimit, nolimitCommand } from './nolimit.js';
+import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
 
 const FPS = 12;
 const { version } = JSON.parse(
@@ -83,6 +92,80 @@ Session persistence (task mode): the last session id is saved to
 $XDG_STATE_HOME/thefactory/session.json (or ~/.local/state/thefactory/session.json)
 and resumes automatically when the working directory matches. Use --new or /new to
 start fresh.`;
+
+// Free OC-NOLIMIT model ids (keep in sync with nolimit.js configureOpenCode()).
+// theFactory cycles through these in the /config card and /models command.
+const NOLIMIT_MODEL_IDS = [
+  'beam-free',
+  'big-pickle',
+  'crouton-alpha-free',
+  'deepseek-v4.1-flash-free',
+  'flint-40b-free',
+  'glm-5.3-flash-free',
+  'mimo-v2.6-flash-free',
+  'nemotron-3.5-lightning-free',
+  'nemotron-3.5-super-vl-free',
+  'pulse-alpha-free',
+].map((id) => `OC-NOLIMIT/${id}`);
+
+/**
+ * Cycle one /config card row's value on `options` (mutates in place, matching
+ * the /fallback command's live-edit pattern). `memory` carries the user's own
+ * model id and fallback list (CLI/env/…/fallback) as extra cycle steps.
+ * Returns a display label for the log, or null for unknown/non-editable keys.
+ */
+export function cycleConfigValue(options, key, dir = 1, memory = {}) {
+  const step = dir < 0 ? -1 : 1;
+  if (key === 'model') {
+    const custom = typeof memory.model === 'string' ? memory.model : null;
+    const cycle = [...(custom ? [custom] : []), null, ...NOLIMIT_MODEL_IDS];
+    const index = cycle.indexOf(options.model ?? null);
+    const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
+    options.model = next;
+    return next ?? '(default)';
+  }
+  if (key === 'fallbacks') {
+    const presets = [
+      [],
+      ...NOLIMIT_MODEL_IDS.map((model) => [model]),
+      ...(Array.isArray(memory.fallbacks) && memory.fallbacks.length ? [[...memory.fallbacks]] : []),
+    ];
+    const current = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
+    const index = presets.findIndex((preset) => preset.join(',') === current.join(','));
+    const next = presets[(Math.max(0, index) + step + presets.length) % presets.length];
+    options.fallbackModels = next;
+    return next.length ? next[0] : '(none)';
+  }
+  if (key === 'auto') {
+    options.auto = !options.auto;
+    return options.auto ? 'ON' : 'OFF';
+  }
+  if (key === 'parallel') {
+    const cycle = [
+      { parallel: false },
+      { parallel: true, workers: 3 },
+      { parallel: true, workers: 4 },
+      { parallel: true, workers: 6 },
+    ];
+    const index = cycle.findIndex(
+      (entry) => entry.parallel === Boolean(options.parallel)
+        && (options.parallel ? (options.workers ?? 3) === entry.workers : true),
+    );
+    const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
+    options.parallel = next.parallel;
+    if (next.parallel) options.workers = next.workers;
+    return next.parallel ? `${next.workers} workers` : 'OFF';
+  }
+  if (key === 'sequential') {
+    options.sequential = !options.sequential;
+    return options.sequential ? 'ON' : 'OFF';
+  }
+  if (key === 'nolimit') {
+    options.nolimit = options.nolimit ? null : 'status';
+    return options.nolimit ? 'ON' : 'OFF';
+  }
+  return null;
+}
 
 /** Parse the small, dependency-free flag set. */
 export function parseArgs(argv) {
@@ -419,6 +502,50 @@ async function runTui(mode, options) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
     }
   }
+
+  // Current settings for the /config card. Readers (run launch, scheduler)
+  // consume `options` at launch time, so live mutations apply to the next task.
+  const configSnapshot = () => ({
+    model: options.model,
+    fallbackModels: options.fallbackModels,
+    auto: options.auto,
+    parallel: options.parallel,
+    workers: options.workers,
+    sequential: options.sequential,
+    dir: options.dir,
+    session: currentSessionID ?? options.session,
+    nolimit: options.nolimit,
+  });
+
+  // User-authored model/fallbacks (CLI/env/…/fallback), remembered so the card
+  // cycle keeps them as extra steps between the built-in presets.
+  let customModel = null;
+  let customFallbackModels = null;
+  const rememberCustoms = () => {
+    const list = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
+    if (list.length > 0) customFallbackModels = [...list];
+    if (options.model && !NOLIMIT_MODEL_IDS.includes(options.model)) customModel = options.model;
+  };
+
+  /** Cycle the selected config row's value (enter/←/→ inside the card). */
+  const applyConfigChange = (key, dir = 1) => {
+    const value = cycleConfigValue(options, key, dir, { model: customModel, fallbacks: customFallbackModels });
+    if (value === null) return;
+    if (key === 'model') {
+      // The card's model is global: push it into opencode.json for the
+      // orchestrator, every subagent, and the top-level default.
+      const applied = applyModelToAllAgents(options.model);
+      if (applied.ok) {
+        app.addLog(`config · model → ${value} · applied to all ${applied.agents} agent(s) + default`);
+      } else {
+        app.addLog(`! config · model → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
+      }
+    } else {
+      app.addLog(`config · ${key} → ${value}`);
+    }
+    app.updateConfigInfo(configSnapshot());
+  };
+
   let finish;
   const done = new Promise((resolve) => {
     finish = resolve;
@@ -627,6 +754,212 @@ async function runTui(mode, options) {
     }, 2500);
   };
 
+  /**
+   * Parallel engine wiring (Phases 1–6): plan the objective into a task DAG,
+   * dispatch it through the scheduler with independent opencode workers, then
+   * report conflicts and persist state for /resume. Never a silent success —
+   * every worker outcome is logged and surfaced on the agent pillars.
+   */
+  const launchParallelRun = async (objective, token) => {
+    const concurrency = options.sequential ? 1 : (options.workers ?? 3);
+    const runId = `run_${Date.now()}`;
+
+    // --- Phase 1: plan (fresh session so the plan is unpolluted).
+    app.applyEvent({
+      kind: 'status',
+      from: 'orchestrator',
+      text: `planning: decomposing into tasks · ${concurrency} worker${concurrency === 1 ? '' : 's'}`,
+    });
+    const planChunks = [];
+    let plan;
+    let plannerWarn = null;
+    let plannerHandle = null;
+    let manager = null;
+    // Unified abort: while the planner runs, kill its child; once workers
+    // exist, cancel running ones. killTimer's late SIGKILL hits handles.
+    activeRun = {
+      kill: (signal) => {
+        try { plannerHandle?.kill(signal); } catch {}
+        if (!manager) return;
+        for (const [workerId, record] of manager.workers) {
+          if (record.state !== 'running' || !record.handle) continue;
+          try {
+            if (signal === 'SIGKILL') record.handle.kill('SIGKILL');
+            else manager.cancel(workerId);
+          } catch {}
+        }
+      },
+    };
+    try {
+      plannerHandle = launchRun({
+        task: buildPlanningPrompt(objective, {
+          maxTasks: Math.max(2, Math.min(8, concurrency * 2)),
+          sequential: Boolean(options.sequential),
+        }),
+        model: options.model,
+        auto: options.auto,
+        dir: options.dir,
+        bin: options.opencode,
+        onEvent: (parsed) => {
+          if (parsed.text) planChunks.push(parsed.text);
+        },
+        onError: () => {},
+      });
+      const planResult = await plannerHandle.done;
+      plannerHandle = null;
+      if (stopped || token !== runToken) return;
+      if (planResult.code !== 0 && !planChunks.length) {
+        throw new Error(`planner run failed: ${planResult.error?.message ?? `exit ${planResult.code}`}`);
+      }
+      try {
+        plan = parsePlan(planChunks.join('\n'));
+      } catch (error) {
+        throw new Error(error?.message ?? String(error));
+      }
+    } catch (error) {
+      plannerHandle = null;
+      plannerWarn = truncate(error?.message ?? String(error), 120);
+      plan = fallbackPlan(objective);
+      app.addLog(`! planner failed: ${plannerWarn} — single-task fallback`);
+      app.applyEvent({
+        kind: 'status',
+        from: 'orchestrator',
+        text: `⚠ planner failed — single-task fallback (${concurrency} worker${concurrency === 1 ? '' : 's'})`,
+      });
+    }
+    if (stopped || token !== runToken) return;
+    app.addLog(`plan: ${plan.length} task(s) — ${plan.map((t) => `${t.id}:${t.agent}`).join(' ')}`);
+    app.applyEvent({
+      kind: 'status',
+      from: 'orchestrator',
+      text: `plan: ${plan.length} task(s) accepted`,
+    });
+
+    // --- Phases 3–6: dispatch through the scheduler with real workers.
+    manager = createWorkerManager({
+      model: options.model,
+      fallbackModels: options.fallbackModels ?? [],
+      dir: options.dir,
+      bin: options.opencode,
+      auto: options.auto,
+    });
+    const taskById = new Map(plan.map((t) => [t.id, t]));
+    const agentOf = (taskId) => taskById.get(taskId)?.agent ?? 'other';
+    const refreshPanel = () => app.setParallelWorkers(manager.list());
+    refreshPanel();
+
+    const offBus = manager.bus.onEvent((evt) => {
+      if (token !== runToken || stopped) return;
+      const agent = agentOf(evt.taskId);
+      const task = taskById.get(evt.taskId);
+      if (evt.kind === 'worker-started') {
+        refreshPanel();
+        const title = truncate(task?.title ?? evt.taskId, 60);
+        app.addLog(`▶ ${agent}: ${title}`);
+        app.applyEvent({ kind: 'msg', dir: 'out', to: agent, text: task?.title ?? evt.taskId });
+      } else if (evt.kind === 'completed') {
+        refreshPanel();
+        const record = manager.workers.get(evt.workerId);
+        const summary = truncate(String(record?.output ?? '').trim() || 'done', 90);
+        app.addLog(`✓ ${agent}: ${summary}`);
+        app.applyEvent({ kind: 'msg', dir: 'in', from: agent, text: record?.output ?? 'done' });
+      } else if (evt.kind === 'failed' || evt.kind === 'cancelled') {
+        refreshPanel();
+        const record = manager.workers.get(evt.workerId);
+        const detail = truncate(String(record?.error ?? evt.text ?? evt.kind), 90);
+        app.addLog(`✗ ${agent}: ${detail}`);
+        app.applyEvent({ kind: 'status', from: agent, text: `✗ ${detail}` });
+      } else if (evt.kind === 'tool') {
+        app.applyEvent({ kind: 'tool', from: agent, text: evt.text });
+      } else if (evt.kind === 'permission') {
+        app.addLog(`⚠ ${agent}: permission requested — see --auto or allow rules`);
+      }
+      // 'started'/'session'/'failure' are logged implicitly via panel updates;
+      // keep the log feed focused on outcomes.
+    });
+
+    let planFailed = false;
+    try {
+      await runTasks({
+        tasks: plan,
+        concurrency,
+        sequential: Boolean(options.sequential),
+        executor: (task) => {
+          const { done } = manager.start({
+            runId,
+            task,
+            objective,
+            model: options.model,
+            dir: options.dir,
+            bin: options.opencode,
+            auto: options.auto,
+          });
+          refreshPanel();
+          return done;
+        },
+      });
+    } catch (error) {
+      planFailed = true;
+      const message = truncate(error?.message ?? String(error), 110);
+      app.addLog(`! scheduler failure: ${message}`);
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ scheduler failure: ${truncate(message, 70)}` });
+    }
+    offBus();
+    if (stopped || token !== runToken) return;
+
+    // --- Integration report: manifest conflicts from the plan (Phase 5 v1).
+    let conflictsNote = null;
+    try {
+      const manifests = plan.map((task) => ({ taskId: task.id, files: task.files ?? [] }));
+      const { conflicts } = detectConflicts(manifests);
+      if (conflicts.length) {
+        conflictsNote = `${conflicts.length} file conflict(s): ${conflicts.slice(0, 3).map((c) => `${c.file}(${c.taskIds.join(',')})`).join('; ')}`;
+        app.addLog(`⚠ integration: ${conflictsNote} — review before merging`);
+      }
+    } catch {}
+    // Persist for /resume (Phase 6 snapshot) into the run workspace.
+    try {
+      saveParallelState(options.dir || process.cwd(), {
+        runId,
+        objective,
+        sequential: Boolean(options.sequential),
+        tasks: plan,
+        workers: manager.list(),
+        counts: manager.counts(),
+        plannerFallback: plannerWarn ? 'true' : null,
+        conflicts: conflictsNote,
+      });
+    } catch {}
+
+    activeRun = null;
+    const counts = manager.counts();
+    const doneCount = counts.completed;
+    const badCount = counts.failed + counts.cancelled;
+    const lastResult = [...manager.workers.values()].reverse().find((r) => r.output)?.output ?? '';
+    if (planFailed || (doneCount === 0 && badCount > 0)) {
+      const message = `parallel run: ${doneCount} completed, ${badCount} failed/cancelled`;
+      app.finishRun('error', message);
+      app.addLog(`! ${message}`);
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ ${message}` });
+    } else {
+      const detail = truncate(lastResult.trim() || (plannerWarn ? `planner fallback · ${plannerWarn}` : ''), 70);
+      app.finishRun(
+        'done',
+        `${plan.length} task(s) · ${doneCount} worker${doneCount === 1 ? '' : 's'}${conflictsNote ? ` · ⚠ ${truncate(conflictsNote, 40)}` : ''}`,
+      );
+      app.addLog(
+        `✓ complete · ${plan.length} task(s) · ${doneCount} succeeded${detail ? ` · last: ${detail}` : ''}`,
+      );
+      app.applyEvent({
+        kind: 'status',
+        from: 'orchestrator',
+        text: `✓ ${plan.length} task(s) complete in ${counts.completed}/${counts.total} workers`,
+      });
+    }
+    abortRequested = false;
+    app.setInputValue(lineInput?.value ?? '');
+  };
+
   const startTask = async (raw) => {
     const rawValue = String(raw ?? '');
     // Preserve the prompt byte-for-byte except outer whitespace for emptiness check.
@@ -654,9 +987,11 @@ async function runTui(mode, options) {
         }
         if (token.toLowerCase() === 'clear') {
           options.fallbackModels = [];
+          customFallbackModels = null;
           app.addLog('fallback models cleared');
         } else {
           options.fallbackModels = parseModelList(token);
+          rememberCustoms();
           app.addLog(`fallback models set: ${options.fallbackModels.join(', ')}`);
         }
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: `fallback: ${options.fallbackModels.length} model(s) · next task uses selector` });
@@ -726,7 +1061,12 @@ async function runTui(mode, options) {
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: `resume set: ${truncate(currentSessionID, 50)}` });
         return;
       }
-      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models)`);
+      if (command === '/config') {
+        rememberCustoms();
+        app.openConfig(configSnapshot());
+        return;
+      }
+      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /config)`);
       return;
     }
     lineInput?.reset();
@@ -751,11 +1091,12 @@ async function runTui(mode, options) {
     app.startRun({
       sessionID: currentSessionID,
       resumed,
-      parallel: options.parallel ? { workers: options.sequential ? 1 : (options.workers ?? 3) } : null,
+      parallel: options.parallel || options.sequential
+        ? { workers: options.sequential ? 1 : (options.workers ?? 3) }
+        : null,
     });
     if (options.parallel || options.sequential) {
       app.setParallelEnabled(true);
-      app.setParallelWorkers([{ workerId: 'w_main', taskId: 'main', role: 'orchestrator', sessionId: currentSessionID, state: 'running' }]);
       app.addLog(`parallel mode: scheduler enabled (${options.sequential ? 1 : (options.workers ?? 3)} workers)`);
     }
     if (currentSessionID) {
@@ -778,6 +1119,12 @@ async function runTui(mode, options) {
       return;
     }
     if (stopped || token !== runToken) return;
+
+    // Parallel engine: plan + scheduler + independent workers (Phases 1–6).
+    if (options.parallel || options.sequential) {
+      await launchParallelRun(task, token);
+      return;
+    }
 
     let handle;
     try {
@@ -831,6 +1178,15 @@ async function runTui(mode, options) {
       // Anything else is swallowed while the overlay is open.
       return;
     }
+    // Config overlay: rows, q/Esc close, other keys are swallowed.
+    if (app.configView.open) {
+      if (text === '\x1b' || text === 'q' || text === 'Q') app.closeConfig();
+      else if (text === '\x1b[A') app.moveConfigSelection(-1);
+      else if (text === '\x1b[B') app.moveConfigSelection(1);
+      else if (text === '\r' || text === '\n' || text === '\x1b[C') applyConfigChange(app.configView.selected, 1);
+      else if (text === '\x1b[D') applyConfigChange(app.configView.selected, -1);
+      return;
+    }
     if (mode === 'task') {
       // Bare `l` opens the log only on an empty composer, so typing l
       // mid-task still types.
@@ -856,6 +1212,7 @@ async function runTui(mode, options) {
     if (text.includes('\u0003')) stop(0);
     else if (text.includes('q')) stop(0);
   };
+
   const onSigint = () => stop(0);
   const onResize = () => {
     const nextWidth = out.columns || width;
@@ -1051,5 +1408,21 @@ export async function main(argv = process.argv.slice(2)) {
   if (options.snapshot != null || !isTTY) {
     return runSnapshot(mode, options, options.snapshot ?? 1);
   }
+  return runTui(mode, options);
+}
+
+/** Show a configuration card in the TUI log overlay. */
+function showConfigCard(app, options) {
+  const model = options.model || '(none)';
+  const fallbacks = options.fallbackModels
+    ? options.fallbackModels.join(', ')
+    : '(none)';
+  const auto = options.auto === true ? 'ON' : 'OFF';
+  const parallel = options.parallel ? `${options.workers || 3}w` : 'OFF';
+  const sequential = options.sequential ? 'ON' : 'OFF';
+  const dir = options.dir || process.cwd();
+  const session = options.session || '(none)';
+  const nolimit = options.nolimit || '(disabled)';
+
   return runTui(mode, options);
 }

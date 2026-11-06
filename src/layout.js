@@ -47,9 +47,20 @@ export function orthogonalPath(start, end, firstAxis = 'horizontal') {
   return steps;
 }
 
-function agentSlotBox(side, band, width, height, boxWidth, boxHeight, centerRow, footerRows) {
+/**
+ * Terminal sizing: `skyRowsFor(height)` rows are reserved at the top of the
+ * frame for the animated factory skyline; the agent band shifts down by it.
+ * 3 = 3-row factory squeezed (24-row terminals), up to 6 = building + wide
+ * smoke sky. Constraint: `1 + rows` <= floor(height/2) - 8 so the top band
+ * always clears the center box (held for everything >= 60x24).
+ */
+export function skyRowsFor(height) {
+  return Math.max(3, Math.min(7, Math.floor((height - 24) / 2) + 3));
+}
+
+function agentSlotBox(side, band, width, height, boxWidth, boxHeight, centerRow, footerRows, skyRows) {
   const rowByBand = {
-    top: 1,
+    top: 1 + skyRows,
     middle: centerRow - Math.floor(boxHeight / 2),
     bottom: height - boxHeight - footerRows,
   };
@@ -90,6 +101,26 @@ function branchFor(spec, box, center) {
 }
 
 /**
+ * Two-lane branches: `path` carries center→agent traffic, `returnPath` the
+ * agent→center lane, offset one cell perpendicular so the two directions
+ * never overlap. Side of the offset flips with the box side so lanes stay
+ * between the boxes they connect, not through them.
+ */
+function returnLaneFor(spec, path) {
+  if (spec.band === 'middle') {
+    // Horizontal lanes stack one row below.
+    return path.map((cell) => ({ row: cell.row + 1, col: cell.col }));
+  }
+  if (spec.band === 'top') {
+    // Vertical lanes sit one column inward on the left, outward on the right.
+    const delta = spec.side === 'left' ? -1 : 1;
+    return path.map((cell) => ({ row: cell.row, col: cell.col + delta }));
+  }
+  const delta = spec.side === 'left' ? 1 : -1;
+  return path.map((cell) => ({ row: cell.row, col: cell.col + delta }));
+}
+
+/**
  * Compute the full frame geometry for a terminal size.
  * Returns `{ tooSmall: true }` below the 60x24 minimum.
  */
@@ -112,16 +143,19 @@ export function buildLayout(width, height, options = {}) {
   center.midRow = center.row + Math.floor(center.height / 2);
   center.midCol = center.col + Math.floor(center.width / 2);
   const centerRow = Math.floor(height / 2);
+  const skyRows = skyRowsFor(height);
 
   const agents = SLOT_SPECS.map((spec) => {
-    const box = agentSlotBox(spec.side, spec.band, width, height, boxWidth, boxHeight, centerRow, footerRows);
+    const box = agentSlotBox(spec.side, spec.band, width, height, boxWidth, boxHeight, centerRow, footerRows, skyRows);
+    const path = branchFor(spec, box, center);
     return {
       key: spec.key,
       label: agentByKey(spec.key)?.label ?? spec.key.toUpperCase(),
       side: spec.side,
       band: spec.band,
       box,
-      path: branchFor(spec, box, center),
+      path,
+      returnPath: returnLaneFor(spec, path),
     };
   });
 
@@ -131,17 +165,19 @@ export function buildLayout(width, height, options = {}) {
     width: boxWidth,
     height: boxHeight,
   };
+  const otherPath = orthogonalPath(
+    { row: center.row + center.height, col: center.midCol },
+    { row: otherBox.row - 1, col: otherBox.col + Math.floor(boxWidth / 2) },
+    'vertical',
+  );
   const other = {
     key: 'other',
     label: 'OTHER',
     side: 'center',
     band: 'bottom',
     box: otherBox,
-    path: orthogonalPath(
-      { row: center.row + center.height, col: center.midCol },
-      { row: otherBox.row - 1, col: otherBox.col + Math.floor(boxWidth / 2) },
-      'vertical',
-    ),
+    path: otherPath,
+    returnPath: otherPath.map((cell) => ({ row: cell.row, col: cell.col - 1 })),
   };
 
   return {
@@ -151,6 +187,7 @@ export function buildLayout(width, height, options = {}) {
     center,
     centerRow,
     footerRows,
+    sky: { rows: skyRows },
     statusRow: height - footerRows,
     inputRow: footerRows >= 2 ? height - 1 : null,
     agents,

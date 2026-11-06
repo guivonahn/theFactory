@@ -2,6 +2,8 @@
 // directory argument to its index module instead of recursively scanning it.
 import './args.test.js';
 import './demo.test.js';
+import '../workin_on/factory.test.js';
+import './plan.test.js';
 import './run.test.js';
 import './log.test.js';
 import './sessionState.test.js';

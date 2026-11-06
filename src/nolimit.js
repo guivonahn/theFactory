@@ -94,6 +94,55 @@ function apiKey() {
 function configureOpenCode() {
   const key = apiKey();
   if (!key) return;
+  configureOpenCodeWith(key);
+}
+
+/**
+ * Write one model to the global opencode.json for EVERY configured agent
+ * (orchestrator, all subagents) plus the top-level default. Pass a null model
+ * to clear the overrides so agents fall back to their own configured defaults.
+ * `configFile` override exists for tests. Returns { ok, agents, error }.
+ */
+export function applyModelToAllAgents(model, { configFile } = {}) {
+  const configDir = process.env.XDG_CONFIG_HOME
+    ? join(process.env.XDG_CONFIG_HOME, 'opencode')
+    : join(homedir(), '.config', 'opencode');
+  const path = configFile ?? join(configDir, 'opencode.json');
+  try {
+    if (!existsSync(path)) return { ok: false, agents: 0, error: 'opencode.json not found' };
+    chmodSync(path, 0o600);
+
+    const config = JSON.parse(readFileSync(path, 'utf8'));
+    // OC-NOLIMIT models declare no variants; a `#variant` suffix fails with
+    // "Variant unavailable". Strip it exactly like configureOpenCode does.
+    const stripped = typeof model === 'string' && model.startsWith('OC-NOLIMIT/') && model.includes('#')
+      ? model.split('#')[0]
+      : model;
+
+    if (stripped) {
+      config.model = stripped;
+    } else {
+      delete config.model;
+    }
+    let changed = 0;
+    if (config.agents && typeof config.agents === 'object') {
+      for (const agent of Object.values(config.agents)) {
+        if (!agent || typeof agent !== 'object') continue;
+        if (stripped) agent.model = stripped;
+        else delete agent.model;
+        changed += 1;
+      }
+    }
+    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    return { ok: true, agents: changed };
+  } catch (error) {
+    return { ok: false, agents: 0, error: error?.message ?? String(error) };
+  }
+}
+
+/** Real configureOpenCode body, split so tests can stub the key source. */
+function configureOpenCodeWith(key) {
   const configDir = process.env.XDG_CONFIG_HOME
     ? join(process.env.XDG_CONFIG_HOME, 'opencode')
     : join(homedir(), '.config', 'opencode');
@@ -109,14 +158,16 @@ function configureOpenCode() {
     apiKey: key,
     baseURL: `http://127.0.0.1:${PORT}/v1`,
     models: {
-      'deepseek-v4-flash-free': { id: 'deepseek-v4-flash-free', name: 'DeepSeek V4 Flash (Free)' },
+      'beam-free': { id: 'beam-free', name: 'Beam (Free)' },
       'big-pickle': { id: 'big-pickle', name: 'Big Pickle (Free)' },
-      'hy3-free': { id: 'hy3-free', name: 'Hy3 (Free)' },
-      'laguna-s-2.1-free': { id: 'laguna-s-2.1-free', name: 'Laguna S 2.1 (Free)' },
+      'crouton-alpha-free': { id: 'crouton-alpha-free', name: 'Crouton Alpha (Free)' },
+      'deepseek-v4.1-flash-free': { id: 'deepseek-v4.1-flash-free', name: 'DeepSeek V4.1 Flash (Free)' },
+      'flint-40b-free': { id: 'flint-40b-free', name: 'Flint 40B (Free)' },
+      'glm-5.3-flash-free': { id: 'glm-5.3-flash-free', name: 'GLM 5.3 Flash (Free)' },
+      'mimo-v2.6-flash-free': { id: 'mimo-v2.6-flash-free', name: 'MiniMax M2.6 Flash (Free)' },
       'nemotron-3.5-lightning-free': { id: 'nemotron-3.5-lightning-free', name: 'Nemotron 3.5 Lightning (Free)' },
-      'mimo-v2.5-free': { id: 'mimo-v2.5-free', name: 'MiniMax M2.5 (Free)' },
-      'nemotron-3-ultra-free': { id: 'nemotron-3-ultra-free', name: 'Nemotron 3 Ultra (Free)' },
-      'ling-3.0-tiny-free': { id: 'ling-3.0-tiny-free', name: 'Ling 3.0 Tiny (Free)' },
+      'nemotron-3.5-super-vl-free': { id: 'nemotron-3.5-super-vl-free', name: 'Nemotron 3.5 Super VL (Free)' },
+      'pulse-alpha-free': { id: 'pulse-alpha-free', name: 'Pulse Alpha (Free)' },
     },
   };
   config.experimental ??= {};
