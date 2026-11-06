@@ -54,12 +54,22 @@ npm link
 thefactory
 ```
 
+## OpenCode Go models
+
+The default agent lineup uses `opencode-go/*` models from OpenCode Go. An active
+OpenCode Go subscription and authentication through OpenCode's `/connect`
+command are required. To choose a Go model explicitly for task mode:
+
+```sh
+thefactory --model opencode-go/kimi-k3.1-pro
+```
+
 ## Built-in opencode-nolimit
 
-The OpenAI-compatible `opencode-nolimit` proxy is bundled with theFactory, so
-the MAS can use its free OpenCode model pool without installing a second
-repository. Nolimit starts automatically before each Factory task. Bun and
-the OpenCode CLI are installed automatically when missing.
+The OpenAI-compatible `opencode-nolimit` proxy remains bundled as an optional
+fallback; it is no longer the default provider. It provides a free OpenCode
+model pool without installing a second repository. Bun and the OpenCode CLI are
+required to run the proxy.
 
 ```sh
 thefactory nolimit status
@@ -67,10 +77,12 @@ thefactory nolimit models
 thefactory nolimit key
 ```
 
-Task execution launches the bundled proxy, waits for it to become healthy, and adds
+Task execution can launch the bundled proxy, wait for it to become healthy, and add
 the generated local API key to `~/.config/opencode/opencode.json` as the
-`OC-NOLIMIT` provider. Models can then be selected as
-`OC-NOLIMIT/deepseek-v4-flash-free` or `OC-NOLIMIT/big-pickle`.
+`OC-NOLIMIT` provider. Its models remain available for explicit fallback selection as
+`OC-NOLIMIT/big-pickle` or `OC-NOLIMIT/deepseek-v4.1-flash-free`. The proxy is
+started only when an `OC-NOLIMIT/*` model is selected (or the config toggle is
+on), so Go-only runs do not depend on Bun or the proxy.
 
 ## Modes
 
@@ -78,7 +90,7 @@ the generated local API key to `~/.config/opencode/opencode.json` as the
 
 ```sh
 thefactory
-thefactory --model openai/gpt-5#high
+thefactory --model opencode-go/kimi-k3.1-pro
 thefactory --opencode /path/to/opencode --dir /path/to/project
 thefactory --session <id-or-slug>          # continue that session
 thefactory --new                           # ignore the persisted session
@@ -232,7 +244,7 @@ hides, or colour escapes. `NO_COLOR` is honoured in TTY mode as well.
 | `--live` | Use OpenCode sessions. Without `--session` in a TTY, open the picker. |
 | `--attach <id\|slug>` | Alias for `--session`. |
 | `--session <id\|slug>` | Exact id, id prefix, or exact slug. A child id is climbed to its root. |
-| `--model <provider/model#variant>` | Forwarded to `opencode run` as `-m`. Task mode only. |
+| `--model <provider/model#variant>` | Forwarded to `opencode run` as `-m`. OpenCode Go is the default; `#variant` is optional and provider-specific. Task mode only. |
 | `--auto` / `--no-auto` | Pass (opt-in) or omit `--auto` for `opencode run`. Task mode only. See Tasks above. |
 | `--opencode <path>` | OpenCode binary. `FACTORY_OPENCODE` also works. Task mode only. |
 | `--dir <path>` | Prefer root sessions whose `directory` equals or ends with the path; task working directory. |

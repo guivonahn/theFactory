@@ -1,6 +1,6 @@
-# Zero-Cost Multi-Agent OpenCode Setup
+# OpenCode Go Multi-Agent OpenCode Setup
 
-Installed for OpenCode **v2.0.15** on **2026-11-05**.
+Installed for OpenCode **v2.2.5** on **2026-11-05**.
 
 ## Architecture
 
@@ -8,15 +8,15 @@ Installed for OpenCode **v2.0.15** on **2026-11-05**.
 USER REQUEST
      |
      v
-ORCHESTRATOR (primary, glm-5.3-flash-free#high)
+ORCHESTRATOR (primary, opencode-go/glm-5.3)
      |
-     +--> EXPLORER  (mimo-v2.6-flash-free)        read-only, fast
-     +--> ARCHITECT (flint-40b-free#high)         read-only, design
+     +--> EXPLORER  (opencode-go/mimo-v2.6-flash)   read-only, fast
+     +--> ARCHITECT (opencode-go/deepseek-v4-pro)   read-only, design
      |
-     +--> DEVELOPER (deepseek-v4.1-flash-free#high)  implementation owner
-     +--> TESTER    (nemotron-3.5-lightning-free)     runs tests, no edits
-     +--> REVIEWER  (big-pickle)                     read-only review
-     +--> SECURITY  (nemotron-3.5-super-vl-free#high) read-only security
+     +--> DEVELOPER (opencode-go/kimi-k3.1-pro)     implementation owner
+     +--> TESTER    (opencode-go/glm-5.3-flash)     runs tests, no edits
+     +--> REVIEWER  (opencode-go/claude-haiku-5-5)  read-only review
+     +--> SECURITY  (opencode-go/grok-4.7)          read-only security
      |
      v
 ORCHESTRATOR reconciles findings and delivers the result
@@ -29,36 +29,38 @@ implementation files.
 
 ## Agents and models
 
-| Agent | Mode | Model | Context | Role |
-| --- | --- | --- | --- | --- |
-| orchestrator | primary | `opencode/glm-5.3-flash-free#high` | 200k | planning, delegation, integration |
-| architect | subagent | `opencode/flint-40b-free#high` | 262k | read-only design and tradeoffs |
-| explorer | subagent | `opencode/mimo-v2.6-flash-free` | 200k | read-only fast code exploration |
-| developer | subagent | `opencode/deepseek-v4.1-flash-free#high` | 200k | implementation |
-| reviewer | subagent | `opencode/big-pickle` | 200k | read-only correctness review |
-| security | subagent | `opencode/nemotron-3.5-super-vl-free#high` | 1M | read-only security review |
-| tester | subagent | `opencode/nemotron-3.5-lightning-free` | 262k | test execution, no edits |
+| Agent | Mode | Model | Role |
+| --- | --- | --- | --- |
+| orchestrator | primary | `opencode-go/glm-5.3` | planning, delegation, integration |
+| architect | subagent | `opencode-go/deepseek-v4-pro` | read-only design and tradeoffs |
+| explorer | subagent | `opencode-go/mimo-v2.6-flash` | read-only fast code exploration |
+| developer | subagent | `opencode-go/kimi-k3.1-pro` | implementation |
+| reviewer | subagent | `opencode-go/claude-haiku-5-5` | read-only correctness review |
+| security | subagent | `opencode-go/grok-4.7` | read-only security review |
+| tester | subagent | `opencode-go/glm-5.3-flash` | test execution, no edits |
 
-All models have an explicit **$0 input / $0 output / $0 cache** price in the
-installed catalog. Verified on 2026-11-05.
+The default lineup requires an active OpenCode Go subscription and `/connect`
+authentication. Model availability is determined by the authenticated OpenCode
+Go catalog.
 
 ## Provider policy
 
-`experimental.policies` is used because OpenCode 2.0.15 predates top-level
-`policies`. It currently enforces:
+`experimental.policies` is retained for compatibility with the existing
+configuration. It currently enforces:
 
 ```json
 [
   { "action": "provider.use", "resource": "*", "effect": "deny" },
-  { "action": "provider.use", "resource": "opencode", "effect": "allow" }
+  { "action": "provider.use", "resource": "opencode", "effect": "allow" },
+  { "action": "provider.use", "resource": "OC-NOLIMIT", "effect": "allow" },
+  { "action": "provider.use", "resource": "opencode-go", "effect": "allow" }
 ]
 ```
 
-Only the `opencode` provider is usable, so a missing free model cannot silently
-fall back to a paid provider. The stored OpenAI credential is preserved but hidden
-by this policy. To use another provider deliberately, add an `allow` statement
-after the broad `deny`, and move the block to top-level `policies` after upgrading
-to an OpenCode version that supports it.
+OpenCode Go is the default provider. `OC-NOLIMIT` remains an optional fallback;
+its allow rule and bundled provider configuration do not make it the default.
+Other providers remain denied. To use another provider deliberately, add an
+`allow` statement after the broad `deny`.
 
 ## Usage
 
@@ -105,7 +107,7 @@ the prompt. The command is defined in `~/.config/opencode/commands/mas.md` and i
 listed in the Ctrl+P command palette as:
 
 ```text
-MAS — run the zero-cost multi-agent orchestrator on this task
+MAS — run the OpenCode Go multi-agent orchestrator on this task
 ```
 
 For the agent selector instead of the command palette:
@@ -146,21 +148,18 @@ User: "Add rate limiting to the API"
 
 ## Changing a model
 
-List verified free models:
+List available OpenCode Go models:
 
 ```bash
-opencode models
+opencode models | grep '^opencode-go/'
 ```
 
-Pick another `opencode/*-free` model, update the agent's `model` in
+Pick another `opencode-go/*` model, update the agent's `model` in
 `~/.config/opencode/opencode.json`, then reload:
 
 ```bash
 opencode reload
 ```
-
-Do not use a model merely because its name contains "free". Confirm its cost in
-`/api/model` (or the model selector) before assigning it.
 
 ## Files
 

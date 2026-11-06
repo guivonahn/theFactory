@@ -1,5 +1,5 @@
 ---
-description: MAS — run the zero-cost multi-agent orchestrator on this task
+description: MAS — run the OpenCode Go multi-agent orchestrator on this task
 agent: orchestrator
 ---
 

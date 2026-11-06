@@ -100,8 +100,9 @@ function configureOpenCode() {
 /**
  * Write one model to the global opencode.json for EVERY configured agent
  * (orchestrator, all subagents) plus the top-level default. Pass a null model
- * to clear the overrides so agents fall back to their own configured defaults.
- * `configFile` override exists for tests. Returns { ok, agents, error }.
+ * to restore the template's per-agent defaults (falling back to clearing the
+ * override when the template is unavailable). `configFile` override exists for
+ * tests. Returns { ok, agents, error }.
  */
 export function applyModelToAllAgents(model, { configFile } = {}) {
   const configDir = process.env.XDG_CONFIG_HOME
@@ -113,22 +114,36 @@ export function applyModelToAllAgents(model, { configFile } = {}) {
     chmodSync(path, 0o600);
 
     const config = JSON.parse(readFileSync(path, 'utf8'));
-    // OC-NOLIMIT models declare no variants; a `#variant` suffix fails with
-    // "Variant unavailable". Strip it exactly like configureOpenCode does.
+    // OpenCode Go models are native and keep their optional variants. Only
+    // OC-NOLIMIT variants are stripped because that provider declares none.
     const stripped = typeof model === 'string' && model.startsWith('OC-NOLIMIT/') && model.includes('#')
       ? model.split('#')[0]
       : model;
 
+    // null means "reset to the shipped defaults", not "delete every model":
+    // the template carries the per-agent OpenCode Go lineup.
+    let template = null;
+    if (!stripped) {
+      try {
+        template = JSON.parse(readFileSync(join(PROJECT_DIR, 'config', 'opencode', 'opencode.json'), 'utf8'));
+      } catch {
+        template = null;
+      }
+    }
+
     if (stripped) {
       config.model = stripped;
+    } else if (template?.model) {
+      config.model = template.model;
     } else {
       delete config.model;
     }
     let changed = 0;
     if (config.agents && typeof config.agents === 'object') {
-      for (const agent of Object.values(config.agents)) {
+      for (const [name, agent] of Object.entries(config.agents)) {
         if (!agent || typeof agent !== 'object') continue;
         if (stripped) agent.model = stripped;
+        else if (template?.agents?.[name]?.model) agent.model = template.agents[name].model;
         else delete agent.model;
         changed += 1;
       }

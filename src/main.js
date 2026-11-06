@@ -78,7 +78,7 @@ Task-mode composer commands (typed instead of a task):
   /sessions              list recent root sessions (pick one, then /resume <id|#n>)
   /resume <id|#n>        continue that session on the next task
   /fallback [list]       show/set quota fallback models (comma-separated, max 8; /fallback clear to reset)
-  /models                list free + nolimit models available for fallback
+  /models                list OpenCode Go models available for fallback
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
@@ -93,20 +93,21 @@ $XDG_STATE_HOME/thefactory/session.json (or ~/.local/state/thefactory/session.js
 and resumes automatically when the working directory matches. Use --new or /new to
 start fresh.`;
 
-// Free OC-NOLIMIT model ids (keep in sync with nolimit.js configureOpenCode()).
-// theFactory cycles through these in the /config card and /models command.
-const NOLIMIT_MODEL_IDS = [
-  'beam-free',
-  'big-pickle',
-  'crouton-alpha-free',
-  'deepseek-v4.1-flash-free',
-  'flint-40b-free',
-  'glm-5.3-flash-free',
-  'mimo-v2.6-flash-free',
-  'nemotron-3.5-lightning-free',
-  'nemotron-3.5-super-vl-free',
-  'pulse-alpha-free',
-].map((id) => `OC-NOLIMIT/${id}`);
+// OpenCode Go agent models and fallback presets, in preferred selection order.
+// theFactory cycles through these in the /config card and uses them as fallback
+// presets; /models queries the live OpenCode catalog.
+export const GO_MODEL_IDS = [
+  'opencode-go/glm-5.3',
+  'opencode-go/deepseek-v4-pro',
+  'opencode-go/mimo-v2.6-flash',
+  'opencode-go/kimi-k3.1-pro',
+  'opencode-go/claude-haiku-5-5',
+  'opencode-go/grok-4.7',
+  'opencode-go/glm-5.3-flash',
+  'opencode-go/deepseek-v4.1-flash',
+  'opencode-go/qwen3.8-max',
+  'opencode-go/minimax-m3',
+];
 
 /**
  * Cycle one /config card row's value on `options` (mutates in place, matching
@@ -118,7 +119,7 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
   const step = dir < 0 ? -1 : 1;
   if (key === 'model') {
     const custom = typeof memory.model === 'string' ? memory.model : null;
-    const cycle = [...(custom ? [custom] : []), null, ...NOLIMIT_MODEL_IDS];
+    const cycle = [...(custom ? [custom] : []), null, ...GO_MODEL_IDS];
     const index = cycle.indexOf(options.model ?? null);
     const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
     options.model = next;
@@ -127,7 +128,7 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
   if (key === 'fallbacks') {
     const presets = [
       [],
-      ...NOLIMIT_MODEL_IDS.map((model) => [model]),
+      ...GO_MODEL_IDS.map((model) => [model]),
       ...(Array.isArray(memory.fallbacks) && memory.fallbacks.length ? [[...memory.fallbacks]] : []),
     ];
     const current = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
@@ -296,6 +297,17 @@ export function parseModelList(csv) {
     .map((s) => s.trim())
     .filter(Boolean)
     .slice(0, 8); // bounded — never more than 8 fallbacks
+}
+
+/**
+ * True only when this run needs the bundled OC-NOLIMIT proxy: an explicit
+ * nolimit toggle, or an OC-NOLIMIT primary/fallback model. Go-only runs never
+ * pay the proxy startup cost or fail because Bun is missing.
+ */
+export function usesNolimit({ model, fallbackModels, nolimit } = {}) {
+  if (nolimit) return true;
+  const models = [model, ...(Array.isArray(fallbackModels) ? fallbackModels : [])];
+  return models.some((entry) => typeof entry === 'string' && entry.startsWith('OC-NOLIMIT/'));
 }
 
 function terminalSize() {
@@ -524,7 +536,7 @@ async function runTui(mode, options) {
   const rememberCustoms = () => {
     const list = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
     if (list.length > 0) customFallbackModels = [...list];
-    if (options.model && !NOLIMIT_MODEL_IDS.includes(options.model)) customModel = options.model;
+    if (options.model && !GO_MODEL_IDS.includes(options.model)) customModel = options.model;
   };
 
   /** Cycle the selected config row's value (enter/←/→ inside the card). */
@@ -999,10 +1011,14 @@ async function runTui(mode, options) {
       }
       if (command === '/models') {
         try {
-          app.addLog('models (run picks in order; * = nolimit):');
           const { execFileSync } = await import('node:child_process');
           const out = execFileSync(options.opencode ?? process.env.FACTORY_OPENCODE ?? 'opencode', ['models'], { encoding: 'utf8', timeout: 15000 });
-          const lines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
+          const allLines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
+          const goLines = allLines.filter((line) => line.startsWith('opencode-go/'));
+          const lines = goLines.length > 0 ? goLines : allLines;
+          app.addLog(goLines.length > 0
+            ? 'models (opencode-go catalog; run picks in order):'
+            : 'models (no opencode-go entries; showing full catalog):');
           lines.slice(0, 20).forEach((l) => app.addLog(` ${l}`));
           if (lines.length > 20) app.addLog(` … +${lines.length - 20} more`);
         } catch (error) {
@@ -1110,14 +1126,17 @@ async function runTui(mode, options) {
       app.addLog(warn);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: warn });
     }
-    app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'preparing built-in opencode-nolimit…' });
-    const nolimit = await ensureNolimit();
-    preparingRun = false;
-    if (!nolimit.ok) {
-      app.finishRun('error', nolimit.error);
-      app.addLog(`! ${truncate(nolimit.error, 110)}`);
-      return;
+    if (usesNolimit(options)) {
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'preparing built-in opencode-nolimit…' });
+      const nolimit = await ensureNolimit();
+      if (!nolimit.ok) {
+        preparingRun = false;
+        app.finishRun('error', nolimit.error);
+        app.addLog(`! ${truncate(nolimit.error, 110)}`);
+        return;
+      }
     }
+    preparingRun = false;
     if (stopped || token !== runToken) return;
 
     // Parallel engine: plan + scheduler + independent workers (Phases 1–6).

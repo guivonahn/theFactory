@@ -62,7 +62,8 @@ This document is a checkpoint, not completion. Only pieces listed as Done are im
   as the default worker transport (run-backend workers still ship for now).
 - Deeper TUI lines beyond 2 workers (data present, display capped for narrow terminals).
 - Real-provider two-session overlap proof — **not yet verified** (free quota 429;
-  all 5 free models return quota; `OC-NOLIMIT/*` returns no-route). Blocked on account quota / Go subscription.
+  all 5 free models return quota; `OC-NOLIMIT/*` returns no-route). OpenCode Go is
+  now configured; re-run the two-session overlap proof with `opencode-go/*`.
 - Stateful long-running parallel runs with auto-resume (reconcile + plan exist; auto-rerun not blind).
 
 ## Checkpoint
