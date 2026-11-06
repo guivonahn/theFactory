@@ -11,10 +11,11 @@
 
 import { launchRun } from './run.js';
 import { createEventBus } from './events.js';
+import { skillPrompt } from './skills.js';
 
 let workerSeq = 0;
 
-export function buildWorkerPrompt({ objective, task, artifacts = [], graphifyGuide = null } = {}) {
+export function buildWorkerPrompt({ objective, task, artifacts = [], graphifyGuide = null, registry } = {}) {
   const parts = [
     `Objective: ${objective ?? task?.title ?? ''}`,
     `Task: ${task?.title ?? ''} (${task?.id ?? ''})`,
@@ -22,6 +23,12 @@ export function buildWorkerPrompt({ objective, task, artifacts = [], graphifyGui
   if (task?.acceptance) parts.push(`Acceptance: ${task.acceptance}`);
   if (task?.files?.length) parts.push(`Scope: ${task.files.join(', ')}`);
   if (artifacts.length) parts.push(`Inputs: ${artifacts.join(', ')}`);
+  // Match the task against registered skills and inject the skill body so the
+  // specialized agent follows the skill's instructions.
+  if (registry) {
+    const searchText = `${task?.title ?? ''} ${task?.acceptance ?? ''} ${objective ?? ''}`;
+    for (const skill of registry.find(searchText)) parts.push(skillPrompt(skill));
+  }
   parts.push('Do only the assigned task. Do not edit outside your workspace.');
   if (graphifyGuide) parts.push(graphifyGuide);
   return parts.join('\n');
@@ -41,7 +48,7 @@ export function createWorkerManager(options = {}) {
     return pool[Math.min(idx ?? 0, pool.length - 1)];
   }
 
-  function start({ runId, task, objective, artifacts = [], model, dir, bin, auto = false } = {}) {
+  function start({ runId, task, objective, artifacts = [], model, dir, bin, auto = false, registry } = {}) {
     if (!task?.id) throw new Error('task id is required');
     const id = workerId();
     const role = task.agent ?? 'orchestrator';
@@ -60,6 +67,7 @@ export function createWorkerManager(options = {}) {
       task,
       artifacts,
       graphifyGuide: options.graphifyGuide,
+      registry,
     });
     const handle = launchRun({
       task: prompt,

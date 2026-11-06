@@ -6,6 +6,7 @@
  */
 
 import { validateTasks } from './scheduler.js';
+import { skillsPrompt } from './skills.js';
 
 /** Agents that exist as opencode subagents in theFactory config. */
 export const PLANNER_AGENTS = ['explorer', 'architect', 'developer', 'reviewer', 'security', 'tester'];
@@ -16,11 +17,15 @@ export const PLANNER_AGENTS = ['explorer', 'architect', 'developer', 'reviewer',
  * plain. Constraints mirror validateTasks + the scheduler's parallelism so a
  * well-formed reply is dispatchable as-is: unique ids, DAG deps, disjoint
  * file scopes for independent tasks, bounded size.
+ *
+ * When `skills` (a skill registry) is provided, the available skills are listed
+ * so the orchestrator can delegate matching tasks to the named specialized
+ * agent.
  */
-export function buildPlanningPrompt(objective, { maxTasks = 6, sequential = false } = {}) {
+export function buildPlanningPrompt(objective, { maxTasks = 6, sequential = false, skills } = {}) {
   const goal = String(objective ?? '').trim();
   const limit = Math.max(1, Math.min(12, maxTasks));
-  return [
+  const parts = [
     'You are a task planner. Decompose the objective below into an execution plan.',
     'Respond with ONLY a JSON object — no prose, no code fences — in exactly this shape:',
     '{"tasks":[{"id":"t1","title":"short title","agent":"explorer","deps":[],"files":["src/x.js"],"readOnly":true,"acceptance":"how to verify"}]}',
@@ -35,11 +40,13 @@ export function buildPlanningPrompt(objective, { maxTasks = 6, sequential = fals
       ? '- Tasks execute strictly one after another (sequential mode); lean on deps for ordering.'
       : '- Independent tasks run in parallel; deps decide the order.',
     '- Finish with one task that verifies or summarizes the whole objective and depends on its inputs.',
+    skills ? skillsPrompt(skills) : '',
     '',
     `Objective: ${goal}`,
     '',
     'JSON only:',
-  ].join('\n');
+  ];
+  return parts.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
 /**

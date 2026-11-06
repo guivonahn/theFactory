@@ -13,6 +13,7 @@ import { truncate } from './canvas.js';
 import { demoEvents, playDemo } from './demo.js';
 import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
+import { startGoUsagePoller } from './goUsage.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
 import { launchRun } from './run.js';
 import { runTasks } from './scheduler.js';
@@ -30,6 +31,7 @@ import {
   savePersistedSession,
 } from './sessionState.js';
 import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
+import { loadSkills, createSkillRegistry } from './skills.js';
 import { PROFILE_ORDER, applyProfileToAllAgents } from './profiles.js';
 import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
 import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
@@ -68,6 +70,10 @@ Flags:
   --no-auto              do not pass --auto (default); ask rules are auto-rejected headlessly (surfaced as ⚠, never silent success)
   --graphify             prepare and use graphify-out/graph.json for task prompts (default)
   --no-graphify          disable graphify (also FACTORY_GRAPHIFY=0)
+  --mouse                enable mouse reporting: click an agent "msg: n" line to
+                         open its log (also FACTORY_MOUSE=1). Off by default
+                         because mouse capture disables native text selection;
+                         while on, hold Shift to select text
   --parallel             run tasks in parallel (scheduler + independent workers; default concurrency 3)
   --workers <n>          parallel worker/concurrency limit (default 3, min 1)
   --sequential           force single-worker execution (debugging)
@@ -93,7 +99,9 @@ Task-mode composer commands (typed instead of a task):
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
-Keys in live/demo modes: l opens the log viewer (there is no composer there).
+Keys in live/demo modes: l opens the log viewer (there is no composer there),
+m toggles mouse reporting (off by default so terminal text selection and copy
+work; agent logs also open via l, /log, or 1-6).
 In the log viewer: ←/→ cycle agent (orchestrator + 6 pillars + other), ↑/↓
 scroll, 1-6 jump to explorer/architect/developer/reviewer/security/tester,
 Esc closes.
@@ -214,6 +222,7 @@ export function parseArgs(argv) {
     verbosity: null,
     auto: false,
     graphify: true,
+    mouse: false,
     parallel: false,
     workers: 3,
     sequential: false,
@@ -229,6 +238,7 @@ export function parseArgs(argv) {
   const envFallback = process.env.FACTORY_FALLBACK_MODELS;
   if (envFallback) options.fallbackModels = parseModelList(envFallback);
   if (process.env.FACTORY_GRAPHIFY === '0') options.graphify = false;
+  if (process.env.FACTORY_MOUSE === '1') options.mouse = true;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -306,6 +316,10 @@ export function parseArgs(argv) {
       options.graphify = true;
     } else if (arg === '--no-graphify') {
       options.graphify = false;
+    } else if (arg === '--mouse') {
+      options.mouse = true;
+    } else if (arg === '--no-mouse') {
+      options.mouse = false;
     } else if (arg === '--parallel') {
       options.parallel = true;
     } else if (arg === '--resume') {
@@ -527,6 +541,8 @@ async function runTui(mode, options) {
     mode,
     inputMode: mode === 'task',
   });
+  const goUsagePoller = startGoUsagePoller(app);
+  const skillRegistry = createSkillRegistry(loadSkills());
 
   // CLI profile/verbosity flags mutate the global OpenCode config before the
   // first task, so the next `opencode run` picks them up. Failures are logged
@@ -563,6 +579,18 @@ async function runTui(mode, options) {
   let abortRequested = false;
   let hadPermissionFailure = false;
   let permissionFailureMessage = '';
+  // SGR mouse reporting is opt-in: while enabled, most terminals route mouse
+  // events to the app instead of native click-drag selection, which breaks
+  // copying text out of the terminal. Toggle with --mouse or the m key.
+  let mouseEnabled = false;
+  const setMouseEnabled = (enabled) => {
+    mouseEnabled = enabled;
+    try {
+      out.write(enabled ? '\x1b[?1000h\x1b[?1006h' : '\x1b[?1000l\x1b[?1006l');
+    } catch {
+      // Terminal may not accept mode changes.
+    }
+  };
   let killTimer = null;
   let attachTimer = null;
   let formPollTimer = null;
@@ -818,6 +846,7 @@ async function runTui(mode, options) {
     try { out.write('\x1b[?2004l'); } catch {}
     if (renderTimer) clearInterval(renderTimer);
     if (pollTimer) clearInterval(pollTimer);
+    goUsagePoller.stop();
     if (killTimer) clearTimeout(killTimer);
     if (attachTimer) clearTimeout(attachTimer);
     stopFormPolling();
@@ -1089,6 +1118,7 @@ async function runTui(mode, options) {
         task: buildPlanningPrompt(objective, {
           maxTasks: Math.max(2, Math.min(8, concurrency * 2)),
           sequential: Boolean(options.sequential),
+          skills: skillRegistry,
         }),
         model: options.model,
         auto: options.auto,
@@ -1184,6 +1214,7 @@ async function runTui(mode, options) {
             runId,
             task,
             objective,
+            registry: skillRegistry,
             model: options.model,
             dir: options.dir,
             bin: options.opencode,
@@ -1576,6 +1607,10 @@ async function runTui(mode, options) {
       app.openLog('orchestrator');
       return;
     }
+    if (text === 'm' || text === 'M') {
+      setMouseEnabled(!mouseEnabled);
+      return;
+    }
     if (text.includes('\u0003')) stop(0);
     else if (text.includes('q')) stop(0);
   };
@@ -1601,9 +1636,10 @@ async function runTui(mode, options) {
 
     out.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
     screenEntered = true;
-    // Enable bracketed paste and SGR mouse reporting (click-to-open agent logs).
+    // Enable bracketed paste always. SGR mouse reporting (click-to-open agent
+    // logs) is opt-in because mouse capture disables native text selection.
     try { out.write('\x1b[?2004h'); } catch {}
-    try { out.write('\x1b[?1000h\x1b[?1006h'); } catch {}
+    if (options.mouse) setMouseEnabled(true);
     out.write(app.frame());
     if (input.isTTY) {
       input.setRawMode(true);

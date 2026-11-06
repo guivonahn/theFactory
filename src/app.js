@@ -8,6 +8,7 @@ import { Canvas, displayWidth, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
 import { highlightLine } from './highlight.js';
+import { formatReset } from './goUsage.js';
 import { drawFactory } from '../workin_on/factory.js';
 import {
   createQuestionState,
@@ -21,6 +22,7 @@ const GRAY = APPLE_UIKIT.dark.system;
 
 const PACKET_SPEED = 0.018; // cells per millisecond
 const STEP_MS = 16;
+const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
 
 /** Config overlay rows in display order; editable rows respond to enter/arrows. */
 const CONFIG_ROWS = [
@@ -55,9 +57,9 @@ function clean(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-function statusGlyph(state, now) {
+function statusGlyph(state, now, spinner = '●') {
   if (state.status === 'done') return { glyph: '✓', color: T.success };
-  if (state.status === 'working') return { glyph: '●', color: state.def.color };
+  if (state.status === 'working') return { glyph: spinner, color: state.def.color };
   const pulse = Math.floor(now / 450) % 2 === 0;
   return { glyph: '○', color: pulse ? T.textSecondary : T.border };
 }
@@ -90,7 +92,8 @@ export class App {
     this.totalTools = 0;
     this.totalTokens = 0;
     this.totalKb = 0;
-    this.activity = 'awaiting first task…';
+    this.activity = 'awaiting first task';
+    this.goUsage = null;
     this.centerFlashUntil = 0;
     this.centerFlashColor = T.textPrimary;
     this.centerLog = [];
@@ -142,6 +145,14 @@ export class App {
   setSessionCount(key, count) {
     const state = this.agents.get(key);
     if (state) state.sessions = Math.max(1, count | 0);
+  }
+
+  setGoUsage(usage) {
+    this.goUsage = usage ?? null;
+  }
+
+  _spinner() {
+    return SPINNER_FRAMES[Math.floor(this.now / 180) % SPINNER_FRAMES.length];
   }
 
   /** Keep a small orchestrator log (20 entries max) for task mode. */
@@ -307,7 +318,7 @@ export class App {
       duration: 0,
       detail: '',
     };
-    this.activity = resumed ? 'continuing session…' : 'running task…';
+    this.activity = resumed ? 'continuing session' : 'running task';
     this.centerFlashUntil = this.now + 300;
     this.centerFlashColor = T.textPrimary;
   }
@@ -608,6 +619,75 @@ export class App {
     }
   }
 
+  _drawActiveAgents() {
+    // Need vertical room in the sky slice and horizontal room beside the
+    // centered factory building; otherwise skip so the skyline stays intact.
+    if (this.layout.sky.rows < 4 || this.width < 120) return;
+    const width = 20;
+    const maxHeight = this.layout.sky.rows + 1;
+    const working = [...this.agents.entries()].filter(([key, state]) => (
+      state.status === 'working' && (key !== 'other' || this.showOther)
+    ));
+    const height = Math.min(maxHeight, Math.max(3, working.length + 2));
+    const contentRows = height - 2;
+    const style = working.length > 0 ? T.textPrimary : T.border;
+    const title = `ACTIVE AGENTS (${working.length})`;
+    this.canvas.fill(0, 0, width, height, ' ', 0);
+    this.canvas.box(0, 0, width, height, style, title);
+    // Preserve the full 17-character title inside this compact 20-cell panel.
+    this.canvas.write(0, Math.max(1, Math.floor((width - displayWidth(title)) / 2)), title, style);
+
+    if (working.length === 0) {
+      const pulse = Math.floor(this.now / 450) % 2 === 0;
+      this.canvas.write(1, 2, '○ none working', pulse ? T.textSecondary : T.border);
+      return;
+    }
+
+    const overflow = working.length > contentRows;
+    const visibleCount = overflow ? contentRows - 1 : working.length;
+    working.slice(0, visibleCount).forEach(([, state], index) => {
+      this.canvas.write(1 + index, 2, truncate(`${this._spinner()} ${state.def.label.toUpperCase()}`, width - 4), state.def.color);
+    });
+    if (overflow) {
+      this.canvas.write(height - 2, 2, `+${working.length - visibleCount} more`, T.textSecondary);
+    }
+  }
+
+  _drawGoUsage() {
+    // Need vertical room in the sky slice and horizontal room beside the
+    // centered factory building; otherwise skip so the skyline stays intact.
+    if (this.layout.sky.rows < 4 || this.width < 120) return;
+    const width = 24;
+    const col = this.width - width;
+    const rolling = this.goUsage?.rolling;
+    const linked = rolling && Number.isFinite(rolling.percent) && typeof rolling.resetsAt === 'string';
+    const maxHeight = this.layout.sky.rows + 1;
+    const height = Math.min(maxHeight, linked ? 4 : 3);
+    const percent = linked ? Math.round(rolling.percent) : 0;
+    const color = !linked
+      ? T.textSecondary
+      : percent < 60
+        ? T.success
+        : percent <= 85
+          ? T.warning
+          : T.error;
+    const title = linked ? `GO 5H ${percent}%` : 'GO 5H';
+    this.canvas.fill(0, col, width, height, ' ', 0);
+    this.canvas.box(0, col, width, height, color, title);
+
+    if (!linked) {
+      this.canvas.write(1, col + 2, 'usage unavailable', T.textSecondary);
+      return;
+    }
+    const filled = Math.max(0, Math.min(10, Math.round((rolling.percent / 100) * 10)));
+    const bar = `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${percent}%`;
+    this.canvas.write(1, col + 2, truncate(bar, width - 4), color);
+    if (height >= 4) {
+      const reset = formatReset(rolling.resetsAt, Date.now());
+      this.canvas.write(2, col + 2, truncate(`resets ${reset || '--'}`, width - 4), T.textSecondary);
+    }
+  }
+
   _drawCenter() {
     const box = this.layout.center;
     const flash = this.centerFlashUntil > this.now;
@@ -622,13 +702,14 @@ export class App {
         this._writeHighlighted(box.row + 1 + index, box.col + 2, line, inner - 2, style);
       });
     } else {
-      const lines = wrapText(this.activity, inner - 4);
+      const dots = this.run.state === 'running' ? '.'.repeat((Math.floor(this.now / 450) % 3) + 1) : '';
+      const lines = wrapText(`${this.activity}${dots}`, inner - 4);
       this._writeHighlighted(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, inner - 2, T.textPrimary);
       this.canvas.write(box.row + 2, box.col + 2, truncate(lines[1] ?? '', inner - 2), T.textSecondary);
     }
 
     const working = [...this.agents.values()].filter((state) => state.status === 'working').length;
-    const spin = ['◐', '◓', '◑', '◒'][Math.floor(this.now / 180) % 4];
+    const spin = this._spinner();
     // Row 3 hosts the real parallel worker list when enabled (inputMode log
     // uses rows 1-3 for logs, so only draw when not colliding with 3 log lines).
     if (this.parallel?.enabled && (!this.inputMode || this.centerLog.length < 3)) {
@@ -643,11 +724,12 @@ export class App {
       inner - 2,
       GRAY.gray2,
     );
+    const idlePulse = Math.floor(this.now / 450) % 2 === 0;
     this.canvas.write(
       box.row + 5,
       box.col + 2,
-      truncate(`${spin} ${working}/6 agents working`, inner - 2),
-      working ? T.textPrimary : T.border,
+      truncate(`${working ? spin : '○'} ${working}/6 agents working${working ? '' : ' · idle'}`, inner - 2),
+      working ? T.textPrimary : idlePulse ? T.textSecondary : T.border,
     );
   }
 
@@ -658,7 +740,7 @@ export class App {
       if (!slot) continue;
       const box = slot.box;
       const def = state.def;
-      const status = statusGlyph(state, this.now);
+      const status = statusGlyph(state, this.now, this._spinner());
       const border = state.flashUntil > this.now ? T.textPrimary : state.status === 'idle' ? T.border : def.color;
       this.canvas.box(box.row, box.col, box.width, box.height, border, def.label);
       const inner = box.width - 2;
@@ -670,7 +752,9 @@ export class App {
         const message = state.messages[index];
         if (!message) {
           if (index === 0 && state.messageCount === 0) {
-            this.canvas.write(box.row + 1, box.col + 2, truncate('waiting for task', inner - 2), T.textMuted);
+            const line = state.status === 'working' ? `working ${this._spinner()}` : `${status.glyph} waiting for task`;
+            const color = state.status === 'working' ? def.color : status.color;
+            this.canvas.write(box.row + 1, box.col + 2, truncate(line, inner - 2), color);
           }
           continue;
         }
@@ -774,13 +858,16 @@ export class App {
       ? ORCHESTRATOR.label
       : (this.agents.get(key)?.def.label ?? key.toUpperCase());
     const entries = this._logEntries();
+    const live = this.run.state === 'running'
+      || [...this.agents.values()].some((state) => state.status === 'working');
+    const liveMarker = live ? `${this._spinner()} live · ` : '';
     // Clear the overlay so the underlying frame does not bleed through.
     this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
     this.canvas.box(row, col, boxWidth, boxHeight, T.textPrimary, `LOG: ${label}`);
     this.canvas.write(
       row + 1,
       col + 2,
-      truncate(`${entries.length} entries · ←/→ agent · ↑/↓ scroll · 1-6 pillars · esc close`, boxWidth - 4),
+      truncate(`${liveMarker}${entries.length} entries · ←/→ agent · ↑/↓ scroll · 1-6 pillars · esc close`, boxWidth - 4),
       T.textSecondary,
     );
     const visibleRows = Math.max(1, boxHeight - 4);
@@ -945,6 +1032,8 @@ export class App {
     // agents are working (src hook -> workin_on/factory.js).
     drawFactory(this);
     this._drawBranches();
+    this._drawActiveAgents();
+    this._drawGoUsage();
     this._drawCenter();
     this._drawAgents();
     this._drawPackets();
