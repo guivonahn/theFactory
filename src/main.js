@@ -1193,6 +1193,11 @@ async function runTui(mode, options) {
   const abortTask = () => {
     stopFormPolling();
     if (!activeRun) {
+      if (preparingRun) {
+        abortRequested = true;
+        app.addLog('■ abort requested (preparing)');
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'aborting…' });
+      }
       lineInput?.reset();
       app.setInputValue('');
       return;
@@ -1201,10 +1206,10 @@ async function runTui(mode, options) {
     abortRequested = true;
     app.addLog('■ abort requested');
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'aborting opencode run…' });
-    activeRun.kill('SIGTERM');
+    try { activeRun.kill('SIGTERM'); } catch (e) { app.addLog(`! kill: ${e?.message}`); }
     if (killTimer) clearTimeout(killTimer);
     killTimer = setTimeout(() => {
-      if (activeRun) activeRun.kill('SIGKILL');
+      if (activeRun) { try { activeRun.kill('SIGKILL'); } catch {} }
     }, 2500);
   };
 
@@ -1658,6 +1663,11 @@ async function runTui(mode, options) {
     }
     preparingRun = false;
     if (stopped || token !== runToken) return;
+    if (abortRequested) {
+      app.finishRun('aborted');
+      app.addLog('■ aborted during preparation');
+      return;
+    }
 
     // Parallel engine: plan + scheduler + independent workers (Phases 1–6).
     if (options.parallel || options.sequential) {
