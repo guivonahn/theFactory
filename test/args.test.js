@@ -119,3 +119,26 @@ test('cycleConfigValue cycles verbosity and profile through (default)', () => {
   assert.equal(options.profile, null);
   assert.equal(cycleConfigValue(options, 'profile', -1), 'FREE');
 });
+
+test('parseArgs accepts --volume and --mute/--no-sound', () => {
+  assert.equal(parseArgs(['--task']).volume, null);
+  assert.equal(parseArgs(['--task']).mute, false);
+  assert.equal(parseArgs(['--volume', '40']).volume, 40);
+  assert.equal(parseArgs(['--volume', '0']).volume, 0);
+  assert.equal(parseArgs(['--volume', '100']).volume, 100);
+  assert.equal(parseArgs(['--mute']).mute, true);
+  assert.equal(parseArgs(['--no-sound']).mute, true);
+  assert.throws(() => parseArgs(['--volume', '101']), /--volume expects/);
+  assert.throws(() => parseArgs(['--volume', 'loud']), /--volume expects/);
+  assert.throws(() => parseArgs(['--volume']), /Missing value for --volume/);
+});
+
+test('cycleConfigValue cycles the volume presets', () => {
+  const options = { volume: 80 };
+  assert.equal(cycleConfigValue(options, 'volume', 1), '100%');
+  assert.equal(options.volume, 100);
+  assert.equal(cycleConfigValue(options, 'volume', 1), 'muted (0)');
+  assert.equal(options.volume, 0);
+  assert.equal(cycleConfigValue(options, 'volume', -1), '100%');
+  assert.equal(options.volume, 100);
+});

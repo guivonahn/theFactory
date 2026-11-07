@@ -190,6 +190,24 @@ export function parseRunLine(line) {
       fanout,
       to: target && target.key !== 'other' ? target.key : null,
     });
+    // Capture a compact diff for edit/write tools so theFactory can display
+    // the actual code change, indented and formatted, in the log.
+    const isEdit = /edit|write/i.test(tool);
+    if (isEdit && input && typeof input === 'object') {
+      const lines = [];
+      if (typeof input.oldString === 'string' && input.oldString) {
+        for (const l of String(input.oldString).split('\n').slice(0, 12)) lines.push(`    - ${l}`);
+      }
+      if (typeof input.newString === 'string' && input.newString) {
+        for (const l of String(input.newString).split('\n').slice(0, 12)) lines.push(`    + ${l}`);
+      }
+      if (lines.length === 0 && typeof input.content === 'string' && input.content) {
+        for (const l of String(input.content).split('\n').slice(0, 12)) lines.push(`    + ${l}`);
+      }
+      if (lines.length > 0) {
+        result.diff = `${tool}: ${detail || ''}\n${lines.join('\n')}`.trim();
+      }
+    }
     return result;
   }
 
@@ -438,7 +456,7 @@ export function launchRun(options = {}) {
  * variant) retries a different model too.
  */
 export function isTransientProviderError(text) {
-  return /provider\.quota|free usage limit|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout/i.test(String(text ?? ''));
+  return /provider\.quota|free usage limit|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
 }
 
 /**
@@ -449,28 +467,46 @@ export function isTransientProviderError(text) {
  */
 export async function launchRunWithFallback(options = {}) {
   const models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
-  const maxRetries = Math.min(3, options.fallbackRetries ?? Math.max(0, models.length - 1));
+  const pool = [options.model, ...models].filter(Boolean);
+  const unique = [];
+  for (const m of pool) {
+    if (!unique.includes(m)) unique.push(m);
+  }
+  const maxAttempts = Math.max(1, unique.length);
   const backoff = (n) => new Promise((r) => setTimeout(r, Math.min(2000, 250 * 2 ** n)));
-  let model = options.model;
   let attemptError = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    const handle = launchRun({ ...options, model });
+  let lastHandle = null;
+  let lastResult = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const model = unique[attempt];
+    const handle = launchRun({ ...options, model, onExit: undefined });
+    lastHandle = handle;
+    try { options.onHandle?.(handle); } catch {}
+    let streamedError = '';
+    let streamedText = '';
+    try {
+      handle.onEvent((parsed) => {
+        if (parsed?.error) streamedError = `${streamedError} ${parsed.error}`;
+        if (parsed?.text) streamedText = `${streamedText} ${parsed.text}`;
+        for (const ev of parsed?.events ?? []) {
+          if (ev?.text) streamedText = `${streamedText} ${ev.text}`;
+        }
+      });
+    } catch {}
     const result = await handle.done;
+    lastResult = result;
     const failed =
       result?.error ||
       (result?.code !== 0 && isTransientProviderError(`${result?.stderr ?? ''} ${attemptError ?? ''}`)) ||
-      isTransientProviderError(JSON.stringify(result ?? '{}'));
-    // Accumulate any streamed error text via handle replay.
-    let streamedError = '';
-    handle.onEvent((p) => { if (p?.error) streamedError = `${streamedError} ${p.error}`; });
-    if (!failed) return { handle, result, model: model ?? '(default)' };
-    attemptError = streamedError || result?.error?.message || result?.stderr || 'transient failure';
-    if (!isTransientProviderError(attemptError) || attempt >= maxRetries) {
+      isTransientProviderError(`${result?.stderr ?? ''} ${JSON.stringify(result ?? '{}')} ${streamedError} ${streamedText} ${attemptError ?? ''}`);
+    if (!failed) return { handle, result, model: model ?? '(default)', exhausted: false };
+    attemptError = (streamedError || streamedText || result?.error?.message || result?.stderr || 'transient failure').trim();
+    const isBinaryMissing = /ENOENT|opencode binary not found|not found/i.test(attemptError);
+    if (attempt >= maxAttempts - 1 || isBinaryMissing) {
       return { handle, result, model: model ?? '(default)', exhausted: true };
     }
-    model = models[(attempt + 1) % Math.max(1, models.length)] ?? model;
-    if (model == null) break;
+    try { options.onRetry?.(unique[attempt + 1], attemptError); } catch {}
     await backoff(attempt);
   }
-  return { handle: null, result: null, model: model ?? '(default)', exhausted: true };
+  return { handle: lastHandle, result: lastResult, model: unique[unique.length - 1] ?? '(default)', exhausted: true };
 }

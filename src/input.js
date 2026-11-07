@@ -101,6 +101,11 @@ export class LineInput {
     }
 
     let i = 0;
+    // Heuristic for terminals without bracketed paste: a chunk that contains a
+    // newline but is more than a bare Enter is almost certainly a paste, so
+    // keep the newline as literal text instead of submitting.
+    const isEnter = text === '\r' || text === '\n' || text === '\r\n';
+    const pasteLike = !isEnter && text.length > 1 && (text.includes('\n') || text.includes('\r'));
     while (i < text.length) {
       if (this.pasting) {
         const endAt = text.indexOf(PASTE_END, i);
@@ -110,7 +115,7 @@ export class LineInput {
           const keep = partial >= 3 ? partial : 0;
           const bodyEnd = keep ? text.length - keep : text.length;
           if (bodyEnd > i) {
-            const body = text.slice(i, bodyEnd);
+            const body = text.slice(i, bodyEnd).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
             this.value += body;
             this.cursor = Array.from(this.value).length;
             actions.push({ type: 'pasted', lines: body.split('\n').length });
@@ -119,7 +124,7 @@ export class LineInput {
           i = text.length;
           break;
         }
-        const body = text.slice(i, endAt);
+        const body = text.slice(i, endAt).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         this.value += body;
         this.cursor = Array.from(this.value).length;
         actions.push({ type: 'pasted', lines: body.split('\n').length });
@@ -161,6 +166,12 @@ export class LineInput {
         break;
       }
       if (char === '\r' || char === '\n') {
+        if (pasteLike) {
+          this.insertText(char === '\r' ? '\n' : char);
+          actions.push({ type: 'changed' });
+          i = next;
+          continue;
+        }
         actions.push({ type: 'submit', value: this.value });
         i = next;
         break;

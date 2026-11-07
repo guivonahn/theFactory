@@ -8,8 +8,7 @@
  *   state: queued|running|completed|failed|cancelled, startedAt, finishedAt,
  *   output, error, handle }
  */
-
-import { launchRun } from './run.js';
+import { launchRunWithFallback } from './run.js';
 import { createEventBus } from './events.js';
 import { skillPrompt } from './skills.js';
 
@@ -69,10 +68,12 @@ export function createWorkerManager(options = {}) {
       graphifyGuide: options.graphifyGuide,
       registry,
     });
-    const handle = launchRun({
+
+    const launchedPromise = launchRunWithFallback({
       task: prompt,
       agent: role,
       model: resolved,
+      fallbackModels: options.fallbackModels ?? [],
       dir: record.dir,
       bin,
       auto,
@@ -88,6 +89,9 @@ export function createWorkerManager(options = {}) {
         for (const ev of parsed.events ?? []) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { fanout: !!ev.fanout, to: ev.to ?? null } });
         }
+        if (parsed.diff) {
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: 'status', text: parsed.diff });
+        }
         if (parsed.permission) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'permission', text: `⚠ permission requested: ${parsed.permission.action}`, meta: parsed.permission });
         }
@@ -95,21 +99,28 @@ export function createWorkerManager(options = {}) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'failure', text: `✗ ${parsed.error}` });
         }
       },
+      onHandle: (h) => { record.handle = h; },
+      onRetry: (nextModel, reason) => { record.error = `retrying: ${reason}`; bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `retrying on ${nextModel}` }); },
       onError: (error) => { record.error = String(error?.message ?? error); },
     });
-    record.handle = handle;
+
+    record.handle = null;
+    record.handle = null;
     record.state = 'running';
     bus.publish({ runId, workerId: id, taskId: task.id, kind: 'worker-started', text: `${role} worker ${id} started` });
 
-    const done = handle.done.then((result) => {
+    const done = (async () => {
+      const launched = await launchedPromise;
+      const result = launched?.result;
+      record.handle = launched?.handle ?? record.handle;
       record.finishedAt = Date.now();
-      if (result.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
-      else if (result.code === 0) record.state = 'completed';
-      else { record.state = 'failed'; record.error = record.error ?? `exit ${result.code}`; }
-      bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: record.state, text: `${record.state}: ${task.id}`, meta: { code: result.code ?? null } });
+      if (result?.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
+      else if (result?.code === 0) record.state = 'completed';
+      else { record.state = 'failed'; record.error = record.error ?? `exit ${result?.code}`; }
+      bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: record.state, text: `${record.state}: ${task.id}`, meta: { code: result?.code ?? null } });
       return record;
-    });
-    return { record, done, handle };
+    })();
+    return { record, done, handle: record.handle };
   }
 
   function cancel(workerIdValue) {

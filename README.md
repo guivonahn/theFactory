@@ -32,7 +32,42 @@ npm link
 thefactory
 ```
 
-## Modes
+## Screenshots
+
+```
+
+
+                                   ▐█▌
+        ┌▓▓▓┐‾/\‾/\‾/\‾/\‾/\‾/\‾/\‾▐█▌      ██████ ░████░ ░█████ ██████ ░████░ ██████ ██░░██
+        │▓▓▓│░░▪░░░░▪░░░░▪░░░░▪░░░░▐█▌  the ██░░░░ ██░░██ ██░░░░ ░░██░░ ██░░██ ██░░██ ░░██░░
+        │▓▓▓│░░░░░░░░░░░░░░░░░░░░░░▐█▌      █████░ ██████ ██░░░░ ░░██░░ ██░░██ █████░ ░░██░░
+        └▓▓▓┘▪▪░▪▪░▪▪░▪▪░▪▪░▪▪░▪▪░░▐█▌      ██░░░░ ██░░██ ░█████ ░░██░░ ░████░ ██░░▟█ ░░██░░
+
+  ┌──────────── EXPLORER ────────────✓┐                      ┌──────────── ARCHITECT ───────────◐┐
+  │ » Explore the auth surface: rout… │                      │ » Map module boundaries and the … │
+  │ « Found 3 relevant files: src/au… │──────++       ++─────│ « Proposed AuthService + Session… │
+  │ msg:2 tool:2                      │      ││       ││     │ msg:3 tool:1                      │
+  └───────────────────────────────────┘      ││       ││     └───────────────────────────────────┘
+                                        ┌── ORCHESTRATOR ──┐
+                                        │ › ← architect:   │
+                                        │ Wrap-up:         │
+                                       ││                  ││
+  ┌──────────── DEVELOPER ───────────✓┐││ msgs 19 · tools… ││┌──────────── REVIEWER ────────────✓┐
+  │ » Implement AuthService with a S… │││ ◐ 1/6 agents wo… │││ » Review the diff for regression… │
+  │ « Wrote src/auth.js and src/sess… ││└──────────────────┘││ « 2 nits: guard refresh, rename … │
+  │ msg:4 tool:5                      ││││                ││││ msg:4 tool:1                      │
+  └───────────────────────────────────┘ ││                ││ └───────────────────────────────────┘
+                                        ││                ││
+                                        ││                ││
+                                        ││                ││
+                                        ││                ││
+  ┌──────────── SECURITY ────────────✓┐ ││                ││ ┌───────────── TESTER ─────────────✓┐
+  │ » Audit token storage, SQL param… │ ││                ││ │ » Run the auth and session suite… │
+  │ « No injection paths. Rotate the… │──+                +──│ « 18 pass, 1 fail: the refresh p… │
+  │ msg:2 tool:1                      │                      │ msg:4 tool:2                      │
+  └───────────────────────────────────┘                      └───────────────────────────────────┘
+ theFactory · demo · 19 msgs · 0 packet(s) · q quit                                          100×32
+```
 
 - **Task** — type a task, press Enter, watch OpenCode work and the six pillars
   light up. This is the default in a terminal.
@@ -52,11 +87,24 @@ thefactory
 Composer commands:
 
 ```
-/new  /sessions  /resume <id|#n>  /fallback  /models  /config  /log
+/new  /sessions  /resume <id|#n>  /fallback  /models  /volume  /config  /log
 ```
 
 `/config` opens an editable card for the model, profile, verbosity, fallbacks,
-auto-approve, parallelism, nolimit and graphify settings.
+auto-approve, parallelism, nolimit, graphify and sound volume settings.
+
+## Sounds
+
+`pop.mp3` plays when an agent is called (orchestrator → subagent, worker
+starts, pillar tools), `error.mp3` on failures (failed tasks, tool errors,
+pillar failures), and `completed.mp3` when a task finishes successfully.
+`/volume` shows or sets the volume — `/volume 50`, `/volume mute`,
+`/volume on`, `/volume +10` — and persists it across runs.
+The `/config` card's `volume` row cycles `0 (muted) / 25 / 50 / 80 / 100`.
+Flags: `--volume <0-100>`, `--mute` / `--no-sound`; env: `FACTORY_VOLUME`,
+`FACTORY_SOUND=0`. Volume is passed to the audio player itself
+(`afplay -v` on macOS, `ffplay -volume` / `mpv` / `mpg123` elsewhere); the OS
+output volume is left untouched. Snapshot frames stay silent.
 
 ## Model profiles
 
@@ -66,6 +114,14 @@ auto-approve, parallelism, nolimit and graphify settings.
 - Switching back to a paid level restores the OpenCode Go lineup.
 
 Set a profile with `--profile low|medium|high|free` or the `/config` profile row.
+
+Auto-fallback (on by default): when a model hits a usage/rate limit, theFactory
+automatically retries on the next model in the active pool (OpenCode Go models
+for paid profiles, `opencode/*-free` models for the free profile) instead of
+failing. Toggle it in `/config` (`autoFallback` row) or with
+`--auto-fallback` / `--no-auto-fallback` (env `FACTORY_AUTO_FALLBACK=0`).
+Manual lists via `--fallback-models` / `/fallback` disable auto-fallback and
+use your list instead. Single runs and parallel workers both retry.
 
 ## Verbosity
 

@@ -29,12 +29,13 @@ const CONFIG_ROWS = [
   { key: 'model', label: 'model', editable: true },
   { key: 'profile', label: 'profile', editable: true },
   { key: 'verbose', label: 'verbose', editable: true },
-  { key: 'fallbacks', label: 'fallbacks', editable: true },
+  { key: 'autoFallback', label: 'autoFallback', editable: true },
   { key: 'auto', label: 'auto', editable: true },
   { key: 'parallel', label: 'parallel', editable: true },
   { key: 'sequential', label: 'sequential', editable: true },
   { key: 'nolimit', label: 'nolimit', editable: true },
   { key: 'graphify', label: 'graphify', editable: true },
+  { key: 'volume', label: 'volume', editable: true },
   { key: 'dir', label: 'dir', editable: false },
   { key: 'session', label: 'session', editable: false },
 ];
@@ -74,6 +75,9 @@ export class App {
     this.color = options.color !== false;
     this.mode = options.mode ?? 'demo';
     this.inputMode = Boolean(options.inputMode);
+    // Sound hook: (name: 'pop' | 'error') => void. The TUI wires this to
+    // src/sound.js; snapshots/tests leave it null so replay stays silent.
+    this.onSound = typeof options.onSound === 'function' ? options.onSound : null;
     this.footerRows = this.inputMode ? 3 : 1;
     this.canvas = new Canvas(this.width, this.height, { color: this.color });
     this.layout = buildLayout(this.width, this.height, { footerRows: this.footerRows });
@@ -101,6 +105,8 @@ export class App {
     this.configView = { open: false, selected: 'model', info: {} };
     this.imageView = { open: false, image: null };
     this.questionView = { open: false };
+    this.sessionID = null;
+    this.sessionTitle = null;
     this.inputValue = '';
     this.run = {
       state: 'idle',
@@ -141,6 +147,12 @@ export class App {
     return Boolean(this.layout.tooSmall);
   }
 
+  /** Fire a sound cue (pop/error). Failures are swallowed: audio never breaks rendering. */
+  cueSound(name) {
+    if (!this.onSound) return;
+    try { this.onSound(name); } catch {}
+  }
+
   /** Update the live-session subtitle count for an agent pillar. */
   setSessionCount(key, count) {
     const state = this.agents.get(key);
@@ -151,13 +163,29 @@ export class App {
     this.goUsage = usage ?? null;
   }
 
+  /** Set the current session id + optional title/slug for the header. */
+  setSession(id, title = null) {
+    if (id === null) { this.sessionID = null; this.sessionTitle = null; return; }
+    if (typeof id === 'string' && id) this.sessionID = id;
+    if (title != null) {
+      const t = String(title).trim();
+      if (t) this.sessionTitle = t;
+    }
+  }
+
   _spinner() {
     return SPINNER_FRAMES[Math.floor(this.now / 180) % SPINNER_FRAMES.length];
   }
 
   /** Keep a small orchestrator log (20 entries max) for task mode. */
   addLog(text) {
-    const line = clean(text);
+    const line = String(text ?? '')
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+      .map((part) => part.replace(/[ \t]+/g, ' ').trim())
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
     if (!line) return;
     this.centerLog.push(line);
     if (this.centerLog.length > 20) this.centerLog.shift();
@@ -373,12 +401,17 @@ export class App {
     } else if (status === 'idle') {
       state.status = 'idle';
     } else if (status === 'working') {
+      if (state.status !== 'working') this.cueSound('pop');
       state.status = 'working';
     }
   }
 
   /** Mark the current run done, aborted or failed. */
   finishRun(state, detail = '') {
+    // Error cue first: finishRun('error') is the terminal signal for task
+    // failures, nolimit/viewer setup errors and permission failures.
+    if (state === 'error') this.cueSound('error');
+    else if (state === 'done') this.cueSound('completed');
     const duration = this.run.startedAt ? Math.max(0, this.now - this.run.startedAt) : 0;
     this.run = { ...this.run, state, duration, detail: clean(detail) };
     // A finished run must clear the ACTIVE AGENTS panel; otherwise pillars
@@ -484,6 +517,8 @@ export class App {
     // Real payload size in bytes drives the KB node count downstream.
     const bytes = event.bytes ?? Buffer.byteLength(text, 'utf8');
     state.status = 'working';
+    // Orchestrator -> agent: "an agent is called" gets the pop cue.
+    if (dir === 'out') this.cueSound('pop');
 
     const verb = dir === 'out' ? '→' : '←';
     this.activity = `${verb} ${state.def.label.toLowerCase()}: ${truncate(text, 64)}`;
@@ -505,6 +540,8 @@ export class App {
       this.centerFlashUntil = this.now + 220;
       this.activity = `tool: ${detail || 'running tool'}`;
       if (!event.fanout) return;
+      // A fanned-out tool (subagent/task) is the orchestrator calling an agent.
+      this.cueSound('pop');
       const targets = event.to ? [this._agentKey(event.to)] : [...AGENT_ORDER];
       targets.forEach((target, index) => {
         const slot = this._slotFor(target);
@@ -524,6 +561,8 @@ export class App {
     const state = this.agents.get(key);
     if (!state) return;
     if (key === 'other') this.showOther = true;
+    // A pillar running a tool is an agent actively called on the job.
+    this.cueSound('pop');
     state.toolCount += 1;
     state.status = 'working';
     state.pulseUntil = this.now + 1000;
@@ -577,6 +616,15 @@ export class App {
       lowered.includes('abort')
     ) {
       state.status = 'idle';
+      // Tool/runtime failures surface as error cues (finishRun covers the
+      // terminal task failure; this covers mid-run pillar failures).
+      if (
+        lowered.includes('✗') || lowered.includes('fail') ||
+        lowered.includes('error') ||
+        event.state === 'error'
+      ) {
+        this.cueSound('error');
+      }
     } else if (event.state === 'working') {
       state.status = 'working';
     } else {
@@ -850,14 +898,22 @@ export class App {
     }
     // Multiline prompt: collapsed `[pasted n lines]` preview (like opencode),
     // full buffer preserved for submit. Viewport = last line.
-    const all = String(this.inputValue).split('\n');
+    const all = String(this.inputValue).split(/\r\n|\r|\n/);
     const total = all.length;
     const lastLine = (all[all.length - 1] ?? '').replace(/\r$/, '');
     const prefix = total > 1 ? `[pasted ${total} lines] ` : '';
     const lines = wrapText(prefix + lastLine, inner);
     const visible = lines.slice(-rows.length);
     visible.forEach((line, index) => {
-      this.canvas.write(rows[index], promptCol, line, T.textPrimary);
+      const row = rows[index];
+      const marker = prefix.trimEnd(); // '[pasted N lines]'
+      if (prefix && line.startsWith(marker)) {
+        const rest = line.slice(marker.length);
+        const afterMarker = this.canvas.write(row, promptCol, marker, GRAY.yellow);
+        this.canvas.write(row, afterMarker, rest, T.textPrimary);
+      } else {
+        this.canvas.write(row, promptCol, line, T.textPrimary);
+      }
     });
     const lastRow = rows[visible.length - 1];
     const cursorCol = promptCol + displayWidth(visible[visible.length - 1] ?? '');
@@ -866,11 +922,12 @@ export class App {
 
   _drawStatus() {
     const idleTaskHint = this.run.state === 'running'
-      ? ' · esc abort · /log log'
+      ? ' · esc abort · /log log · Enter×2 steer'
       : ' · /sessions pick · /new fresh · /log log';
+    const sessionSuffix = this.sessionID ? ` · session ${this.sessionID}` : '';
     const prefix = this.inputMode
-      ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}`
-      : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit`;
+      ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}${sessionSuffix}`
+      : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit${sessionSuffix}`;
     const statusColor = !this.inputMode
       ? T.textSecondary
       : this.run.state === 'error'
@@ -933,12 +990,13 @@ export class App {
       model: info.model || '(default)',
       profile: info.profile || '(default)',
       verbose: info.verbosity ? info.verbosity.toUpperCase() : '(default)',
-      fallbacks: info.fallbackModels?.length ? info.fallbackModels.join(', ') : '(none)',
+      autoFallback: info.autoFallback ? `ON (${(info.fallbackModels || []).length} models)` : 'OFF',
       auto: info.auto ? 'ON' : 'OFF',
       parallel: info.parallel ? `${info.workers || 3} workers` : 'OFF',
       sequential: info.sequential ? 'ON' : 'OFF',
       nolimit: info.nolimit ? 'ON' : 'OFF',
       graphify: info.graphify ? 'ON' : 'OFF',
+      volume: info.volume == null ? '(default)' : (info.volume === 0 ? 'muted (0)' : `${info.volume}%`),
       dir: info.dir || process.cwd(),
       session: info.session || '(new on next task)',
     };
@@ -1062,6 +1120,22 @@ export class App {
     });
   }
 
+  /** Paint a compact session id/title header at the very top of the frame. */
+  _drawSessionHeader() {
+    if (!this.sessionID) return;
+    const title = this.sessionTitle ? ` · ${this.sessionTitle}` : '';
+    const text = `session: ${this.sessionID}${title}`;
+    // Keep clear of the ACTIVE AGENTS panel (left) and GO usage panel (right).
+    const leftPad = 22;
+    const rightPad = 26;
+    const maxWidth = Math.max(20, this.width - leftPad - rightPad);
+    const shown = truncate(text, maxWidth);
+    if (!shown) return;
+    const col = Math.max(leftPad, Math.floor((this.width - shown.length) / 2));
+    // Clear the strip behind the text so the skyline doesn't bleed through.
+    this.canvas.fill(0, col, shown.length, 1, ' ', 0);
+    this.canvas.write(0, col, shown, T.textSecondary);
+  }
   /** Paint the current state into the back buffer. */
   draw() {
     if (this.layout.tooSmall) return;
@@ -1072,6 +1146,7 @@ export class App {
     this._drawBranches();
     this._drawActiveAgents();
     this._drawGoUsage();
+    this._drawSessionHeader();
     this._drawCenter();
     this._drawAgents();
     this._drawPackets();

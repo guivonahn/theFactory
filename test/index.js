@@ -21,5 +21,6 @@ import './parallel.test.js';
 import './serve.test.js';
 import './input.test.js';
 import './activeAgents.test.js';
+import './sound.test.js';
 import './goUsage.test.js';
 import './skills.test.js';

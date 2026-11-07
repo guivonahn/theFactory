@@ -21,6 +21,31 @@ export const FREE_AGENT_MODELS = {
   tester: 'opencode/nemotron-3.5-lightning-free',
 };
 
+// Free-tier fallback pool: ALL free models from OpenCode (opencode provider
+// and opencode-go provider). OC-NOLIMIT proxy models are intentionally
+// excluded — they require the Bun-based proxy and are not part of the default
+// fallback. When auto-fallback is on (free profile), retries cycle through
+// every one of these so a rate-limited free model can switch to another free
+// model instead of failing or falling back to a paid Go model.
+export const FREE_FALLBACK_MODELS = [
+  // opencode provider (no proxy needed)
+  'opencode/beam-free',
+  'opencode/crouton-alpha-free',
+  'opencode/deepseek-v4.1-flash-free',
+  'opencode/flint-40b-free',
+  'opencode/glm-5.3-flash-free',
+  'opencode/iceman-free',
+  'opencode/mimo-v2.6-flash-free',
+  'opencode/nemotron-3.5-lightning-free',
+  'opencode/nemotron-3.5-super-vl-free',
+  // opencode-go provider (free tier of Go)
+  'opencode-go/beam-free',
+  'opencode-go/crouton-alpha-free',
+  'opencode-go/iceman-contributor-free',
+];
+
+const DEFAULT_FREE_MODEL = 'opencode/crouton-alpha-free';
+
 // Declared OpenCode Go variants. Unknown models deliberately have no entry so
 // profile changes strip old suffixes and leave their base model id untouched.
 export const MODEL_VARIANTS = {
@@ -117,24 +142,39 @@ export function applyProfileToAllAgents(profile, { configFile } = {}) {
         : baseModel(current)
     );
 
-    if (typeof config.model === 'string') {
-      config.model = free
+    if (typeof config.model === 'string' || config.model == null) {
+      const nextModel = free
         ? FREE_AGENT_MODELS.orchestrator
         : withProfile(
-          typeof template?.model === 'string' ? template.model : baseModel(config.model),
-          profile,
-        );
+            typeof template?.model === 'string' ? template.model
+              : (typeof config.model === 'string' ? baseModel(config.model) : null),
+            profile,
+          );
+      if (nextModel) config.model = nextModel;
+      else delete config.model;
     }
 
     const applied = [];
     if (config.agents && typeof config.agents === 'object') {
       for (const [agent, definition] of Object.entries(config.agents)) {
-        if (!definition || typeof definition !== 'object' || typeof definition.model !== 'string') continue;
+        if (!definition || typeof definition !== 'object') continue;
+        if (typeof definition.model !== 'string') {
+          // No model pinned: in free mode pin to a free model instead of leaving
+          // a paid Go default; otherwise leave it unset.
+          if (free) {
+            definition.model = FREE_AGENT_MODELS[agent] ?? DEFAULT_FREE_MODEL;
+            applied.push({ agent, model: definition.model });
+          }
+          continue;
+        }
         definition.model = free
-          ? (FREE_AGENT_MODELS[agent] ?? baseModel(definition.model))
+          ? (FREE_AGENT_MODELS[agent] ?? (baseModel(definition.model)?.endsWith('-free') ? baseModel(definition.model) : DEFAULT_FREE_MODEL))
           : withProfile(baseFor(agent, definition.model), profile);
         applied.push({ agent, model: definition.model });
       }
+    }
+    if (free && (typeof config.model !== 'string' || !String(config.model).endsWith('-free'))) {
+      config.model = FREE_AGENT_MODELS.orchestrator;
     }
     writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
     chmodSync(path, 0o600);

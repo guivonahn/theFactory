@@ -15,7 +15,7 @@ import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
 import { startGoUsagePoller } from './goUsage.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
-import { launchRun } from './run.js';
+import { launchRun, launchRunWithFallback } from './run.js';
 import { runTasks } from './scheduler.js';
 import { createWorkerManager } from './worker.js';
 import { detectConflicts } from './integrate.js';
@@ -32,11 +32,20 @@ import {
 } from './sessionState.js';
 import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
 import { loadSkills, createSkillRegistry } from './skills.js';
-import { PROFILE_ORDER, applyProfileToAllAgents } from './profiles.js';
+import { PROFILE_ORDER, applyProfileToAllAgents, FREE_FALLBACK_MODELS } from './profiles.js';
 import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
 import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
 import { apiRequest, formAnswerBody } from './opencodeApi.js';
 import { openExternalCommand } from './media.js';
+import {
+  VOLUME_PRESETS,
+  createSoundPlayer,
+  envSoundEnabled,
+  formatVolume,
+  normalizeVolume,
+  parseVolumeCommand,
+  savePersistedVolume,
+} from './sound.js';
 
 const FPS = 12;
 const { version } = JSON.parse(
@@ -74,6 +83,13 @@ Flags:
                          open its log (also FACTORY_MOUSE=1). Off by default
                          because mouse capture disables native text selection;
                          while on, hold Shift to select text
+  --volume <0-100>       sound volume for agent/error cues (also FACTORY_VOLUME;
+                         default 80, persisted across runs; 0 = muted)
+  --mute / --no-sound    disable sound cues (also FACTORY_SOUND=0)
+  --auto-fallback        automatically retry on another model when one hits a
+                         usage/rate limit (default on)
+  --no-auto-fallback     disable automatic model fallback (use --fallback-models
+                         or /fallback for a manual list)
   --parallel             run tasks in parallel (scheduler + independent workers; default concurrency 3)
   --workers <n>          parallel worker/concurrency limit (default 3, min 1)
   --sequential           force single-worker execution (debugging)
@@ -95,6 +111,8 @@ Task-mode composer commands (typed instead of a task):
   /resume <id|#n>        continue that session on the next task
   /fallback [list]       show/set quota fallback models (comma-separated, max 8; /fallback clear to reset)
   /models                list OpenCode Go models available for fallback
+  /volume [0-100|mute|on|off|+n|-n]
+                         show/set sound volume (persisted; plays a pop preview)
   /log                   open the log viewer (works even while a task is running)
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
@@ -158,17 +176,9 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
     options.verbosity = next;
     return next ? next.toUpperCase() : '(default)';
   }
-  if (key === 'fallbacks') {
-    const presets = [
-      [],
-      ...GO_MODEL_IDS.map((model) => [model]),
-      ...(Array.isArray(memory.fallbacks) && memory.fallbacks.length ? [[...memory.fallbacks]] : []),
-    ];
-    const current = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
-    const index = presets.findIndex((preset) => preset.join(',') === current.join(','));
-    const next = presets[(Math.max(0, index) + step + presets.length) % presets.length];
-    options.fallbackModels = next;
-    return next.length ? next[0] : '(none)';
+  if (key === 'autoFallback') {
+    options.autoFallback = !options.autoFallback;
+    return options.autoFallback ? 'ON' : 'OFF';
   }
   if (key === 'auto') {
     options.auto = !options.auto;
@@ -202,6 +212,13 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
     options.graphify = !options.graphify;
     return options.graphify ? 'ON' : 'OFF';
   }
+  if (key === 'volume') {
+    const current = normalizeVolume(options.volume) ?? options.volume;
+    const index = VOLUME_PRESETS.indexOf(current);
+    const next = VOLUME_PRESETS[(Math.max(0, index) + step + VOLUME_PRESETS.length) % VOLUME_PRESETS.length];
+    options.volume = next;
+    return formatVolume(next);
+  }
   return null;
 }
 
@@ -223,6 +240,9 @@ export function parseArgs(argv) {
     auto: false,
     graphify: true,
     mouse: false,
+    volume: null,
+    mute: false,
+    autoFallback: true,
     parallel: false,
     workers: 3,
     sequential: false,
@@ -239,6 +259,7 @@ export function parseArgs(argv) {
   if (envFallback) options.fallbackModels = parseModelList(envFallback);
   if (process.env.FACTORY_GRAPHIFY === '0') options.graphify = false;
   if (process.env.FACTORY_MOUSE === '1') options.mouse = true;
+  if (process.env.FACTORY_AUTO_FALLBACK === '0') options.autoFallback = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -320,6 +341,19 @@ export function parseArgs(argv) {
       options.mouse = true;
     } else if (arg === '--no-mouse') {
       options.mouse = false;
+    } else if (arg === '--auto-fallback') {
+      options.autoFallback = true;
+    } else if (arg === '--no-auto-fallback') {
+      options.autoFallback = false;
+    } else if (arg === '--volume') {
+      const volume = normalizeVolume(requireValue(argv, index, arg));
+      if (volume === null) throw new Error('--volume expects an integer 0-100');
+      options.volume = volume;
+      index += 1;
+    } else if (arg === '--mute' || arg === '--no-sound' || arg === '--silent') {
+      options.mute = true;
+    } else if (arg === '--sound') {
+      options.mute = false;
     } else if (arg === '--parallel') {
       options.parallel = true;
     } else if (arg === '--resume') {
@@ -541,6 +575,16 @@ async function runTui(mode, options) {
     mode,
     inputMode: mode === 'task',
   });
+  // Sound cues (pop on agent call, error on failure). Only the interactive
+  // TUI wires this hook, so snapshot/demo-frame builds stay silent.
+  const soundPlayer = createSoundPlayer({
+    volume: options.volume,
+    enabled: options.mute ? false : envSoundEnabled(),
+  });
+  options.volume = soundPlayer.getVolume();
+  app.onSound = (name) => {
+    try { soundPlayer.play(name); } catch {}
+  };
   const goUsagePoller = startGoUsagePoller(app);
   const skillRegistry = createSkillRegistry(loadSkills());
 
@@ -553,6 +597,11 @@ async function runTui(mode, options) {
       app.addLog(applied.ok
         ? `profile ${options.profile} · applied to ${applied.agents} agent(s) + default`
         : `! profile ${options.profile} · ${applied.error ?? 'apply failed'}`);
+    }
+    if (options.autoFallback) {
+      const isFree = options.profile === 'free';
+      const pool = isFree ? [...FREE_FALLBACK_MODELS] : [...GO_MODEL_IDS];
+      options.fallbackModels = pool.filter((m) => m !== options.model);
     }
     if (options.verbosity) {
       const applied = applyVerbosityToAllAgents(options.verbosity);
@@ -579,6 +628,9 @@ async function runTui(mode, options) {
   let abortRequested = false;
   let hadPermissionFailure = false;
   let permissionFailureMessage = '';
+  let steerArmed = false;
+  let steerText = '';
+  let steerRun = null;
   // SGR mouse reporting is opt-in: while enabled, most terminals route mouse
   // events to the app instead of native click-drag selection, which breaks
   // copying text out of the terminal. Toggle with --mouse or the m key.
@@ -616,6 +668,14 @@ async function runTui(mode, options) {
     }
     if (currentSessionID && !options.fresh) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+    }
+    if (currentSessionID) {
+      app.setSession(currentSessionID);
+      try {
+        const sessions = listRootSessions({ dir: options.dir, limit: 50 });
+        const found = sessions.find((s) => s.id === currentSessionID);
+        if (found) app.setSession(currentSessionID, found.title || found.slug);
+      } catch {}
     }
   }
 
@@ -774,6 +834,7 @@ async function runTui(mode, options) {
     verbosity: options.verbosity,
     fallbackModels: options.fallbackModels,
     auto: options.auto,
+    autoFallback: options.autoFallback,
     graphify: options.graphify,
     parallel: options.parallel,
     workers: options.workers,
@@ -781,12 +842,50 @@ async function runTui(mode, options) {
     dir: options.dir,
     session: currentSessionID ?? options.session,
     nolimit: options.nolimit,
+    volume: soundPlayer.getVolume(),
   });
+
+  /** Recompute options.fallbackModels from autoFallback + profile. */
+  const syncFallbacks = () => {
+    if (!options.autoFallback) return;
+    const isFree = options.profile === 'free';
+    const pool = isFree ? [...FREE_FALLBACK_MODELS] : [...GO_MODEL_IDS];
+    // Exclude the currently selected primary model from the fallback pool.
+    options.fallbackModels = pool.filter((m) => m !== options.model);
+  };
+
+  /** Apply a sound volume (persisted + live): 0 mutes, >0 un-mutes. */
+  const setSoundVolume = (volume, { preview = true } = {}) => {
+    const next = soundPlayer.setVolume(volume);
+    if (next === null) return null;
+    options.volume = next;
+    savePersistedVolume(next);
+    app.updateConfigInfo(configSnapshot());
+    if (preview && next > 0) {
+      try { soundPlayer.play('pop'); } catch {}
+    }
+    return next;
+  };
+
+  /** Handle `/volume [value]` (task composer). Returns true when handled. */
+  const handleVolumeCommand = (text) => {
+    const parsed = parseVolumeCommand(text, soundPlayer.getVolume());
+    if (parsed.action === 'show') {
+      app.addLog(parsed.message);
+    } else if (parsed.action === 'error') {
+      app.addLog(parsed.message);
+    } else {
+      setSoundVolume(parsed.volume);
+      app.addLog(`volume ${formatVolume(parsed.volume)} · persisted`);
+    }
+    return true;
+  };
 
   // User-authored model/fallbacks (CLI/env/…/fallback), remembered so the card
   // cycle keeps them as extra steps between the built-in presets.
   let customModel = null;
   let customFallbackModels = null;
+  let fallbackSwitched = false;
   const rememberCustoms = () => {
     const list = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
     if (list.length > 0) customFallbackModels = [...list];
@@ -822,6 +921,9 @@ async function runTui(mode, options) {
       } else {
         app.addLog(`! config · profile → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
       }
+    } else if (key === 'autoFallback') {
+      syncFallbacks();
+      app.addLog(`config · autoFallback → ${value}`);
     } else if (key === 'verbose') {
       const applied = applyVerbosityToAllAgents(options.verbosity);
       if (applied.ok) {
@@ -829,12 +931,15 @@ async function runTui(mode, options) {
       } else {
         app.addLog(`! config · verbose → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
       }
+    } else if (key === 'volume') {
+      setSoundVolume(options.volume);
+      app.addLog(`config · volume → ${value}`);
     } else {
       app.addLog(`config · ${key} → ${value}`);
     }
+    if (options.autoFallback) syncFallbacks();
     app.updateConfigInfo(configSnapshot());
   };
-
   let finish;
   const done = new Promise((resolve) => {
     finish = resolve;
@@ -884,6 +989,17 @@ async function runTui(mode, options) {
     finish(code);
   };
 
+  /** Apply historical backfill without sound cues (replay is not live audio). */
+  const applyBackfillQuiet = (events) => {
+    const previous = app.onSound;
+    app.onSound = null;
+    try {
+      for (const event of events) app.applyEvent(event);
+    } finally {
+      app.onSound = previous;
+    }
+  };
+
   const startPolling = () => {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
@@ -915,7 +1031,8 @@ async function runTui(mode, options) {
         source?.close();
         source = next;
         applySessionCounts(app, next);
-        for (const event of next.loadBackfill()) app.applyEvent(event);
+        if (next.root) app.setSession(next.root.id, next.root.title || next.root.slug);
+        applyBackfillQuiet(next.loadBackfill());
         startPolling();
       } catch (error) {
         next.close();
@@ -945,7 +1062,7 @@ async function runTui(mode, options) {
     }
     if (parsed.text) {
       lastText = parsed.text;
-      app.addLog(`▸ ${truncate(parsed.text, 110)}`);
+      app.addLog(`▸ ${parsed.text}`);
     }
     if (parsed.permission) {
       const action = parsed.permission.action ?? 'permission';
@@ -960,7 +1077,14 @@ async function runTui(mode, options) {
       }
     }
     for (const event of parsed.events ?? []) app.applyEvent(event);
+    if (parsed.diff) {
+      app.addLog(parsed.diff);
+    }
     if (parsed.error) {
+      // Mid-run tool/runtime errors land here before any terminal finishRun,
+      // and some carry no ✗ status (plain ⚠), so cue explicitly. The player
+      // throttles duplicates with the finishRun error cue.
+      try { soundPlayer.play('error'); } catch {}
       const rawError = String(parsed.error);
       const denied = /permission denied/i.test(rawError);
       if (denied) {
@@ -985,6 +1109,13 @@ async function runTui(mode, options) {
   const finishTask = (result) => {
     activeRun = null;
     stopFormPolling();
+    if (fallbackSwitched) {
+      fallbackSwitched = false;
+      try {
+        if (options.profile) applyProfileToAllAgents(options.profile);
+        else applyModelToAllAgents(null);
+      } catch {}
+    }
     if (killTimer) {
       clearTimeout(killTimer);
       killTimer = null;
@@ -1030,7 +1161,7 @@ async function runTui(mode, options) {
       if (detail) {
         for (const line of detail.split(/\r?\n/)) {
           const trimmed = line.trim();
-          if (trimmed) app.addLog(trimmed.slice(0, 110));
+          if (trimmed) app.addLog(trimmed.slice(0, 500));
         }
       } else {
         app.addLog('(no final report)');
@@ -1114,26 +1245,35 @@ async function runTui(mode, options) {
       },
     };
     try {
-      plannerHandle = launchRun({
+      let plannerLaunched;
+      plannerHandle = null;
+      plannerLaunched = launchRunWithFallback({
         task: buildPlanningPrompt(objective, {
           maxTasks: Math.max(2, Math.min(8, concurrency * 2)),
           sequential: Boolean(options.sequential),
           skills: skillRegistry,
         }),
         model: options.model,
+        fallbackModels: options.fallbackModels ?? [],
         auto: options.auto,
         dir: options.dir,
         bin: options.opencode,
         onEvent: (parsed) => {
           if (parsed.text) planChunks.push(parsed.text);
         },
+        onHandle: (h) => { plannerHandle = h; },
+        onRetry: (nextModel, reason) => {
+          if (token !== runToken || stopped) return;
+          try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          app.addLog(`↻ planner retrying on ${nextModel}: ${truncate(reason, 80)}`);
+        },
         onError: () => {},
       });
-      const planResult = await plannerHandle.done;
+      const planResult = await plannerLaunched;
       plannerHandle = null;
       if (stopped || token !== runToken) return;
-      if (planResult.code !== 0 && !planChunks.length) {
-        throw new Error(`planner run failed: ${planResult.error?.message ?? `exit ${planResult.code}`}`);
+      if (planResult.result?.code !== 0 && !planChunks.length) {
+        throw new Error(`planner run failed: ${planResult.result?.error?.message ?? `exit ${planResult.result?.code}`}`);
       }
       try {
         plan = parsePlan(planChunks.join('\n'));
@@ -1201,6 +1341,9 @@ async function runTui(mode, options) {
         app.applyEvent({ kind: 'tool', from: agent, text: evt.text });
       } else if (evt.kind === 'permission') {
         app.addLog(`⚠ ${agent}: permission requested — see --auto or allow rules`);
+      } else if (evt.kind === 'status') {
+        // Carries an indented diff preview for edit/write tools.
+        app.addLog(`${agent}:\n${evt.text}`);
       }
       // 'started'/'session'/'failure' are logged implicitly via panel updates;
       // keep the log feed focused on outcomes.
@@ -1234,7 +1377,13 @@ async function runTui(mode, options) {
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ scheduler failure: ${truncate(message, 70)}` });
     }
     offBus();
-    if (stopped || token !== runToken) return;
+    if (fallbackSwitched) {
+      fallbackSwitched = false;
+      try {
+        if (options.profile) applyProfileToAllAgents(options.profile);
+        else applyModelToAllAgents(null);
+      } catch {}
+    }
 
     // --- Integration report: manifest conflicts from the plan (Phase 5 v1).
     let conflictsNote = null;
@@ -1319,11 +1468,13 @@ async function runTui(mode, options) {
         if (token.toLowerCase() === 'clear') {
           options.fallbackModels = [];
           customFallbackModels = null;
-          app.addLog('fallback models cleared');
+          options.autoFallback = false;
+          app.addLog('fallback models cleared · auto-fallback off');
         } else {
           options.fallbackModels = parseModelList(token);
           rememberCustoms();
-          app.addLog(`fallback models set: ${options.fallbackModels.join(', ')}`);
+          options.autoFallback = false;
+          app.addLog(`fallback models set: ${options.fallbackModels.join(', ')} · auto-fallback off`);
         }
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: `fallback: ${options.fallbackModels.length} model(s) · next task uses selector` });
         return;
@@ -1348,6 +1499,7 @@ async function runTui(mode, options) {
       if (command === '/new' || command === '/fresh') {
         currentSessionID = null;
         clearPersistedSession();
+        app.setSession(null);
         app.addLog('fresh session — next task starts a new session');
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'fresh session — next task starts a new session' });
         return;
@@ -1392,6 +1544,12 @@ async function runTui(mode, options) {
         }
         currentSessionID = nextID;
         savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+        app.setSession(currentSessionID);
+        try {
+          const sessions = listRootSessions({ dir: options.dir, limit: 50 });
+          const found = sessions.find((s) => s.id === currentSessionID);
+          if (found) app.setSession(currentSessionID, found.title || found.slug);
+        } catch {}
         app.addLog(`resume set: ${truncate(currentSessionID, 60)}`);
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: `resume set: ${truncate(currentSessionID, 50)}` });
         return;
@@ -1401,19 +1559,35 @@ async function runTui(mode, options) {
         app.openConfig(configSnapshot());
         return;
       }
+      if (command === '/volume') {
+        handleVolumeCommand(task);
+        return;
+      }
+      if (command === '/steer') {
+        const steerText = rest.join(' ').trim();
+        if (!steerText) {
+          app.addLog('! usage: /steer <prompt>');
+          return;
+        }
+        steerTask(steerText);
+        return;
+      }
       if (command === '/log') {
         app.openLog('orchestrator');
         return;
       }
-      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /config, /log)`);
+      app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /volume, /steer, /config, /log)`);
       return;
     }
+    if (options.autoFallback) syncFallbacks();
     stopFormPolling();
     closeQuestionAtRunEnd();
     questionRequest = null;
     seenForms.clear();
     seenImages.clear();
     app.closeImage();
+    steerArmed = false;
+    steerText = '';
     lineInput?.reset();
     app.setInputValue('');
     if (pollTimer) {
@@ -1449,7 +1623,7 @@ async function runTui(mode, options) {
       startFormPolling();
     }
     preparingRun = true;
-    app.addLog(`▶ ${truncate(task, 110)}`);
+    app.addLog(`▶ ${task}`);
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: `▶ ${truncate(task, 80)}` });
     if (options.auto === true) {
       const warn = '⚠ auto-approve ON: ask→allow, deny enforced — trusted unattended only';
@@ -1493,7 +1667,7 @@ async function runTui(mode, options) {
 
     let handle;
     try {
-      handle = launchRun({
+      const launched = await launchRunWithFallback({
         task: launchTask,
         model: options.model,
         fallbackModels: options.fallbackModels ?? [],
@@ -1509,16 +1683,34 @@ async function runTui(mode, options) {
           currentSessionID = id;
           savePersistedSession({ sessionID: id, dir: options.dir });
           app.setRunSession(id);
+          app.setSession(id);
+          try {
+            const sessions = listRootSessions({ dir: options.dir, limit: 50 });
+            const found = sessions.find((s) => s.id === id);
+            if (found) app.setSession(id, found.title || found.slug);
+          } catch {}
           startFormPolling();
         },
         onEvent: (parsed) => {
           if (token === runToken && !stopped) handleParsed(parsed);
         },
-        onExit: (result) => {
-          if (token === runToken) finishTask(result);
+        onHandle: (h) => {
+          handle = h;
+          activeRun = h;
+          if (h?.child?.pid) app.setRunPid(h.child.pid);
+        },
+        onRetry: (nextModel, reason) => {
+          if (token !== runToken || stopped) return;
+          try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          app.addLog(`↻ retrying on ${nextModel}: ${truncate(reason, 80)}`);
+          app.applyEvent({ kind: 'status', from: 'orchestrator', text: `retrying on ${nextModel}` });
         },
         onError: () => {},
       });
+      handle = launched.handle ?? handle;
+      activeRun = handle;
+      if (handle?.child?.pid) app.setRunPid(handle.child.pid);
+      if (token === runToken && !stopped) finishTask(launched.result ?? { code: 0 });
     } catch (error) {
       const message = error?.message ?? String(error);
       stopFormPolling();
@@ -1527,8 +1719,46 @@ async function runTui(mode, options) {
       app.addLog(`! ${truncate(message, 110)}`);
       return;
     }
-    activeRun = handle;
-    if (handle.child?.pid) app.setRunPid(handle.child.pid);
+    if (!handle) {
+      // Fallback: handle not yet assigned (spawn pending); activeRun set via onHandle.
+    }
+  };
+
+  const steerTask = (text) => {
+    const value = String(text ?? '').trim();
+    if (!value || !currentSessionID) return;
+    if (steerRun) {
+      try { steerRun.kill('SIGTERM'); } catch {}
+      steerRun = null;
+    }
+    app.addLog(`steering: ${truncate(value, 110)}`);
+    app.applyEvent({ kind: 'status', from: 'orchestrator', text: `steering: ${truncate(value, 80)}` });
+    try {
+      const handle = launchRun({
+        task: value,
+        model: options.model,
+        fallbackModels: options.fallbackModels ?? [],
+        auto: options.auto,
+        dir: options.dir,
+        bin: options.opencode,
+        sessionID: currentSessionID,
+        onEvent: (parsed) => {
+          if (token === runToken && !stopped) handleParsed(parsed);
+        },
+        onError: () => {},
+      });
+      steerRun = handle;
+      if (handle?.child?.pid) app.addLog(`steer pid ${handle.child.pid}`);
+      handle.done.then((result) => {
+        steerRun = null;
+        if (token !== runToken || stopped) return;
+        if (result?.code !== 0 && !result?.error) {
+          app.addLog(`! steer exited ${result.code}`);
+        }
+      }).catch(() => { steerRun = null; });
+    } catch (error) {
+      app.addLog(`! steer: ${truncate(error?.message ?? String(error), 90)}`);
+    }
   };
 
   const onKey = (buffer) => {
@@ -1595,6 +1825,42 @@ async function runTui(mode, options) {
         app.openLog('orchestrator');
         return;
       }
+      // `/steer` always steers, even mid-run.
+      if ((text === '\r' || text === '\n') && /^\/steer(\s|$)/.test(lineInput.value.trim())) {
+        const cmdText = lineInput.value.trim().replace(/^\/steer\s*/i, '');
+        lineInput.reset();
+        app.setInputValue('');
+        steerTask(cmdText);
+        return;
+      }
+      // `/volume` also works mid-run (startTask normally defers to the active
+      // run), so a user can turn sound down without aborting the task.
+      if ((text === '\r' || text === '\n') && /^\/volume(\s|$)/.test(lineInput.value.trim())) {
+        const commandText = lineInput.value;
+        lineInput.reset();
+        app.setInputValue('');
+        handleVolumeCommand(commandText);
+        return;
+      }
+      if ((text === '\r' || text === '\n') && (activeRun || preparingRun) && lineInput.value.trim() && !lineInput.value.trim().startsWith('/')) {
+        const candidate = lineInput.value;
+        if (steerArmed && candidate === steerText) {
+          steerArmed = false;
+          steerText = '';
+          lineInput.reset();
+          app.setInputValue('');
+          steerTask(candidate);
+          return;
+        }
+        steerArmed = true;
+        steerText = candidate;
+        app.addLog(`steer armed: ${truncate(candidate, 80)} · press Enter again to send (Esc aborts)`);
+        app.applyEvent({ kind: 'status', from: 'orchestrator', text: `steer armed · press Enter again to send` });
+        return;
+      }
+      // Disarm steering on any other submit path.
+      steerArmed = false;
+      steerText = '';
       for (const action of lineInput.handle(buffer)) {
         if (action.type === 'quit') {
           stop(0);
@@ -1635,20 +1901,22 @@ async function runTui(mode, options) {
       source = new LiveSource({ session: options.session, dir: options.dir, limit: options.limit });
       source.open();
       applySessionCounts(app, source);
+      if (source.root) app.setSession(source.root.id, source.root.title || source.root.slug);
     }
 
     out.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
     screenEntered = true;
-    // Enable bracketed paste always. SGR mouse reporting (click-to-open agent
-    // logs) is opt-in because mouse capture disables native text selection.
-    try { out.write('\x1b[?2004h'); } catch {}
-    if (options.mouse) setMouseEnabled(true);
-    out.write(app.frame());
     if (input.isTTY) {
       input.setRawMode(true);
       input.resume();
       raw = true;
     }
+    // Enable bracketed paste after raw mode so the terminal honours it. SGR
+    // mouse reporting (click-to-open agent logs) is opt-in because mouse
+    // capture disables native text selection.
+    try { out.write('\x1b[?2004h'); } catch {}
+    if (options.mouse) setMouseEnabled(true);
+    out.write(app.frame());
     input.on('data', onKey);
     process.on('SIGINT', onSigint);
     out.on('resize', onResize);
@@ -1691,7 +1959,8 @@ async function runTui(mode, options) {
             const tick = options.fast ? 40 : Math.max(20, options.packetSpeed);
             for (const event of events) {
               if (stopped) return;
-              app.applyEvent(event);
+              // History replay is silent; polls after this point are live.
+              applyBackfillQuiet([event]);
               await delay(tick);
             }
             if (stopped) return;
