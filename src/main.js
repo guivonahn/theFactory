@@ -1897,6 +1897,9 @@ async function runTui(mode, options) {
     if (app.configView.open) {
       if (app.modelPicker.open) {
         if (text === '\x1b' || text === 'q' || text === 'Q') app.closeModelPicker();
+        else if (text === 'c' || text === 'C') app.jumpModelPickerToCoarena();
+        else if (text === '\x1b[H' || text === '\x1b[1~') app.modelPicker.selected = 0;
+        else if (text === '\x1b[F' || text === '\x1b[4~') app.modelPicker.selected = app.modelPicker.models.length - 1;
         else if (text === '\x1b[A') app.moveModelPicker(-1);
         else if (text === '\x1b[B') app.moveModelPicker(1);
         else if (text === '\r' || text === '\n') applyModelPickerChoice();

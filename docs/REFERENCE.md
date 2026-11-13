@@ -29,6 +29,9 @@ thefactory
 `/config` has an **all agents** model row and seven independent agent model
 rows. Enter on a model row opens its picker, including Coarena Opus/Fable
 aliases for each configured key. ↑/↓ selects, Enter applies, and Esc cancels;
+Coarena entries stay visible above the scrolling catalog, including when the
+picker opens on a late free model. Press `C` to jump to Coarena, or Home/End
+to select the first/last model.
 ←/→ on the configuration card still cycles models. A model edit creates or updates Custom,
 capturing all seven resolved models and the source preset's effort level.
 Untouched agents retain their exact models and variants, including when the

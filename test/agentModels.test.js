@@ -125,6 +125,47 @@ test('every agent can pick Coarena independently while the preset and other agen
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Coarena choices remain visible when individual pickers open on late free models', () => {
+  const keys = { COARENA_API_KEY_1: 'one', COARENA_API_KEY_2: 'two' };
+  const currentModels = {
+    ...FREE_AGENT_MODELS,
+    developer: 'opencode/nemotron-3.5-super-vl-free',
+  };
+  const coarena = ['coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2'];
+  for (const [width, height] of [[60, 24], [100, 28], [100, 32]]) {
+    for (const agent of MODEL_AGENT_KEYS) {
+      const app = new App({ width, height, color: false });
+      const key = `agent:${agent}`;
+      const models = configModelChoices({ agentModels: currentModels }, key, { env: keys });
+      app.openConfig({});
+      app.openModelPicker(key, models, currentModels[agent]);
+      let frame = app.snapshot(); // First render, without navigating toward Coarena.
+      for (const id of coarena) assert.ok(frame.includes(id), `${agent} at ${width}x${height} initially shows ${id}`);
+      assert.equal(app.modelPickerChoice().model, currentModels[agent], 'opening preserves the current model selection');
+      assert.ok(frame.split('\n').find((line) => line.includes('› '))?.includes(currentModels[agent]));
+      assert.ok(frame.split('\n').every((line) => displayWidth(line) <= width));
+      app.moveModelPicker(1);
+      frame = app.snapshot();
+      for (const id of coarena) assert.ok(frame.includes(id), `${id} remains visible while scrolling`);
+      app.jumpModelPickerToCoarena();
+      assert.equal(app.modelPickerChoice().model, coarena[0]);
+      assert.match(app.snapshot(), /C Coarena/);
+    }
+  }
+});
+
+test('model picker remains usable without Coarena credentials and with a short model list', () => {
+  const app = new App({ width: 60, height: 24, color: false });
+  const choices = ['opencode-go/glm-5.3', 'opencode-go/kimi-k3.1-pro'];
+  app.openConfig({});
+  app.openModelPicker('agent:developer', choices, choices[1]);
+  app.jumpModelPickerToCoarena();
+  assert.equal(app.modelPickerChoice().model, choices[1]);
+  assert.match(app.snapshot(), /opencode-go\/glm-5.3/);
+  assert.match(app.snapshot(), /opencode-go\/kimi-k3.1-pro/);
+  assert.doesNotMatch(app.snapshot(), /C Coarena/);
+});
+
 test('an individual Coarena worker fallback changes only that agent', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'factory-isolated-retry-'));
   try {

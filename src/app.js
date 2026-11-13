@@ -271,7 +271,12 @@ export class App {
 
   moveModelPicker(delta) {
     const picker = this.modelPicker;
-    if (picker.models.length) picker.selected = (picker.selected + delta + picker.models.length * 2) % picker.models.length;
+    if (picker.models.length) picker.selected = ((picker.selected + delta) % picker.models.length + picker.models.length) % picker.models.length;
+  }
+
+  jumpModelPickerToCoarena() {
+    const index = this.modelPicker.models.findIndex((model) => model?.startsWith('coarena-'));
+    if (index >= 0) this.modelPicker.selected = index;
   }
 
   closeModelPicker() { this.modelPicker.open = false; }
@@ -1133,19 +1138,37 @@ export class App {
     const width = Math.min(this.width - 4, 78);
     const height = Math.min(this.height - 2, picker.models.length + 4);
     const visible = Math.max(1, height - 4);
-    if (picker.selected < picker.scroll) picker.scroll = picker.selected;
-    if (picker.selected >= picker.scroll + visible) picker.scroll = picker.selected - visible + 1;
+    const hasCoarena = picker.models.some((model) => model?.startsWith('coarena-'));
+    let pinned = 0;
+    if (hasCoarena) {
+      while (pinned < picker.models.length && (picker.models[pinned] === null || picker.models[pinned]?.startsWith('coarena-'))) pinned += 1;
+    }
+    const divider = pinned > 0 && pinned < picker.models.length ? 1 : 0;
+    const catalogRows = Math.max(1, visible - pinned - divider);
+    if (picker.selected >= pinned) {
+      const selected = picker.selected - pinned;
+      if (selected < picker.scroll) picker.scroll = selected;
+      if (selected >= picker.scroll + catalogRows) picker.scroll = selected - catalogRows + 1;
+    }
+    picker.scroll = Math.max(0, Math.min(picker.scroll, picker.models.length - pinned - catalogRows));
     const row = Math.max(1, Math.floor((this.height - height) / 2));
     const col = Math.floor((this.width - width) / 2);
     const target = picker.key === 'model' ? 'ALL AGENTS' : picker.key.slice(6).toUpperCase();
     this.canvas.box(row, col, width, height, T.border, `Base model: ${target}`);
-    this.canvas.write(row + 1, col + 2, truncate('↑/↓ choose · enter apply · esc cancel', width - 4), T.textSecondary);
-    picker.models.slice(picker.scroll, picker.scroll + visible).forEach((model, index) => {
-      const selected = index + picker.scroll === picker.selected;
+    const help = hasCoarena ? '↑/↓ choose · C Coarena · enter apply · esc cancel' : '↑/↓ choose · enter apply · esc cancel';
+    this.canvas.write(row + 1, col + 2, truncate(help, width - 4), T.textSecondary);
+    const drawModel = (modelIndex, offset) => {
+      const model = picker.models[modelIndex];
+      const selected = modelIndex === picker.selected;
       const label = model ?? 'Use the all-agent model';
-      this.canvas.write(row + 2 + index, col + 2, selected ? '› ' : '  ', T.textPrimary);
-      this.canvas.write(row + 2 + index, col + 4, truncate(label, width - 6), selected ? T.textPrimary : model?.startsWith('coarena-') ? T.info : T.textSecondary);
-    });
+      this.canvas.write(row + 2 + offset, col + 2, selected ? '› ' : '  ', T.textPrimary);
+      this.canvas.write(row + 2 + offset, col + 4, truncate(label, width - 6), selected ? T.textPrimary : model?.startsWith('coarena-') ? T.info : T.textSecondary);
+    };
+    for (let index = 0; index < pinned; index += 1) drawModel(index, index);
+    if (divider) this.canvas.write(row + 2 + pinned, col + 2, '─'.repeat(width - 4), T.border);
+    const start = pinned + picker.scroll;
+    const end = Math.min(picker.models.length, start + catalogRows);
+    for (let index = start; index < end; index += 1) drawModel(index, pinned + divider + index - start);
     const scope = picker.key === 'model' ? 'Applies to all seven agents' : `Only ${picker.key.slice(6)} will change`;
     this.canvas.write(row + height - 2, col + 2, truncate(`${picker.selected + 1}/${picker.models.length} · ${scope}`, width - 4), T.textSecondary);
   }

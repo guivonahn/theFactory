@@ -97,7 +97,9 @@ The seven agent rows choose an independent **base model** for the orchestrator,
 explorer, architect, developer, reviewer, security, and tester. Use ↑/↓ to
 select a named agent row, then press Enter to open its model picker. The picker
 lists Coarena Opus/Fable with key 1 and key 2 separately. ↑/↓ selects a model,
-Enter applies it to that agent, and Esc cancels. ←/→ still cycles models.
+Enter applies it to that agent, and Esc cancels. Coarena choices remain visible
+at the top even when the current model is far down the list; press **C** to
+jump directly to them. Home/End selects the first/last model. ←/→ still cycles models.
 Editing a model automatically
 creates **Custom**, retaining the preset's effort level and every untouched
 agent's model. The **all agents** row sets all seven agents together.
