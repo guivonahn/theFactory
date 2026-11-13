@@ -7,6 +7,9 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { resolveAgent } from './agents.js';
 import { imagesFromPart } from './media.js';
+import { coarenaModels, coarenaRunEnv, isCoarenaModel, usesCoarena } from './coarena.js';
+import { agentModelsRunEnv, hasAgentModels, MODEL_AGENT_KEYS } from './agentModels.js';
+import { toolLogEntry } from './logFormat.js';
 
 const STDERR_TAIL = 2000;
 
@@ -80,6 +83,7 @@ export function parseRunLine(line) {
     events: [],
     images: [],
   };
+  const logMeta = { timestamp: typeof data.timestamp === 'number' ? data.timestamp : undefined, sessionID, model: typeof data.model === 'string' ? data.model : undefined };
 
   // Detect images before any event-specific early return. Tool output is
   // external data, so malformed metadata must never make JSONL parsing fail.
@@ -128,9 +132,10 @@ export function parseRunLine(line) {
   }
 
   if (type === 'text' || part.type === 'text') {
-    const text = clean(typeof part.text === 'string' ? part.text : data.text);
-    if (text) {
+    const text = String(typeof part.text === 'string' ? part.text : data.text ?? '').replace(/\r\n/g, '\n');
+    if (text.trim()) {
       result.text = text;
+      result.logEntry = { id: part.id, kind: 'message', dir: 'in', text, ...logMeta };
       result.events.push({ kind: 'status', from: 'orchestrator', text: `▸ ${tail(text, 120)}` });
     }
     return result;
@@ -145,6 +150,7 @@ export function parseRunLine(line) {
     const tool = clean(
       part.tool ?? part.name ?? part.state?.tool ?? part.state?.title ?? data.tool ?? 'tool',
     );
+    result.logEntry = toolLogEntry(part, logMeta);
     // A tool_use error (deny/ask auto-reject) must surface as an error +
     // a visible status instead of a silent tool event. This is the primary
     // headless failure: stderr says "permission requested; auto-rejecting"
@@ -185,6 +191,7 @@ export function parseRunLine(line) {
     result.tool = tool;
     result.events.push({
       kind: 'tool',
+      logEntry: result.logEntry,
       from: 'orchestrator',
       text: detail ? `${tool}: ${detail}` : tool,
       fanout,
@@ -213,11 +220,19 @@ export function parseRunLine(line) {
 
   if (type === 'error' || data.error) {
     const error = clean(
-      data.error?.message ?? data.message ?? part.text ?? part.state?.error ?? data.error ?? '',
+      data.error?.message ?? data.error?.data?.message ?? data.message ?? part.text ?? part.state?.error ?? (typeof data.error === 'object' ? JSON.stringify(data.error) : data.error) ?? '',
     );
     result.error = error || 'run error';
+    result.logEntry = { kind: 'error', text: result.error, ...logMeta };
     result.events.push({ kind: 'status', from: 'orchestrator', text: `⚠ ${tail(result.error, 100)}` });
     return result;
+  }
+
+  if (type === 'step_finish' && part.tokens) {
+    const { input, output } = part.tokens;
+    if (Number.isFinite(input) && Number.isFinite(output)) {
+      result.logEntry = { kind: 'status', text: `Usage: ${input} input · ${output} output${Number.isFinite(part.cost) ? ` · $${part.cost.toFixed(4)}` : ''}`, tokens: input + output, ...logMeta };
+    }
   }
 
   // step_start / step_finish / synthetic / unknown: only the sessionID matters.
@@ -239,6 +254,7 @@ export function argsForRun(options = {}) {
   const task = String(options.task ?? '');
   const auto = options.auto === true;
   const args = ['run', '--format', 'json'];
+  if (usesCoarena(options) || hasAgentModels(options)) args.push('--standalone');
   if (auto) args.push('--auto');
   if (options.sessionID) args.push('--session', options.sessionID);
   else if (options.continue) args.push('--continue');
@@ -259,9 +275,13 @@ export function launchRun(options = {}) {
   const command = options.bin || options.opencode || process.env.FACTORY_OPENCODE || 'opencode';
   const args = argsForRun(options);
 
+  let env = { ...process.env, ...(options.env ?? {}) };
+  const allAgents = !hasAgentModels(options) && (isCoarenaModel(options.model) || options.coarena && options.fallbackAttempt);
+  if (usesCoarena(options)) env = coarenaRunEnv(env, options.model, { allAgents });
+  if (hasAgentModels(options)) env = agentModelsRunEnv(env, options.model, options.agentModels, options.fallbackAttempt, options.agent ?? 'orchestrator');
   const child = spawn(command, args, {
     cwd: options.dir || process.cwd(),
-    env: { ...process.env, ...(options.env ?? {}) },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   });
@@ -410,6 +430,12 @@ export function launchRun(options = {}) {
 
   const handle = {
     child,
+    model: options.model,
+    agentModels: {
+      ...(allAgents ? Object.fromEntries(MODEL_AGENT_KEYS.map((agent) => [agent, options.model])) : {}),
+      ...options.agentModels,
+      ...(options.fallbackAttempt && hasAgentModels(options) ? { [options.agent ?? 'orchestrator']: options.model } : {}),
+    },
     onEvent(callback) {
       if (typeof callback === 'function') {
         for (const event of received) {
@@ -466,47 +492,53 @@ export function isTransientProviderError(text) {
  * Falls back only on transient errors; other failures resolve immediately.
  */
 export async function launchRunWithFallback(options = {}) {
-  const models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
-  const pool = [options.model, ...models].filter(Boolean);
+  options = { ...options, model: options.agentModels?.[options.agent ?? 'orchestrator'] ?? options.model };
+  options = { ...options, coarena: usesCoarena(options) };
+  let models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
+  if (options.autoFallback && options.coarena) {
+    const selected = options.model?.split('/')[1]?.split('#')[0];
+    const available = coarenaModels({ ...process.env, ...options.env });
+    const ordered = [...available.filter((model) => model.split('/')[1] === selected), ...available.filter((model) => model.split('/')[1] !== selected)];
+    models = [...ordered, ...models];
+  }
+  const pool = [options.model ?? null, ...models.filter(Boolean)];
   const unique = [];
   for (const m of pool) {
     if (!unique.includes(m)) unique.push(m);
   }
   const maxAttempts = Math.max(1, unique.length);
   const backoff = (n) => new Promise((r) => setTimeout(r, Math.min(2000, 250 * 2 ** n)));
-  let attemptError = null;
+  let sessionID = options.sessionID;
+  let cancelled = false;
   let lastHandle = null;
   let lastResult = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const model = unique[attempt];
-    const handle = launchRun({ ...options, model, onExit: undefined });
+    const handle = launchRun({ ...options, model, sessionID, fallbackAttempt: attempt > 0, onExit: undefined });
+    const kill = handle.kill;
+    handle.kill = (signal) => { cancelled = true; return kill(signal); };
     lastHandle = handle;
     try { options.onHandle?.(handle); } catch {}
     let streamedError = '';
-    let streamedText = '';
     try {
       handle.onEvent((parsed) => {
-        if (parsed?.error) streamedError = `${streamedError} ${parsed.error}`;
-        if (parsed?.text) streamedText = `${streamedText} ${parsed.text}`;
-        for (const ev of parsed?.events ?? []) {
-          if (ev?.text) streamedText = `${streamedText} ${ev.text}`;
-        }
+        if (parsed?.error && !parsed.tool && !parsed.permission) streamedError = `${streamedError} ${parsed.error}`;
       });
     } catch {}
     const result = await handle.done;
+    sessionID = handle.sessionID() ?? sessionID;
     lastResult = result;
-    const failed =
-      result?.error ||
-      (result?.code !== 0 && isTransientProviderError(`${result?.stderr ?? ''} ${attemptError ?? ''}`)) ||
-      isTransientProviderError(`${result?.stderr ?? ''} ${JSON.stringify(result ?? '{}')} ${streamedError} ${streamedText} ${attemptError ?? ''}`);
+    const failed = result?.error || streamedError || result?.code !== 0;
     if (!failed) return { handle, result, model: model ?? '(default)', exhausted: false };
-    attemptError = (streamedError || streamedText || result?.error?.message || result?.stderr || 'transient failure').trim();
-    const isBinaryMissing = /ENOENT|opencode binary not found|not found/i.test(attemptError);
-    if (attempt >= maxAttempts - 1 || isBinaryMissing) {
+    // Some OpenCode versions emit an error event but exit with status zero.
+    if (streamedError && result.code === 0) result.code = 1;
+    const attemptError = [streamedError, result?.error?.message, result?.stderr].filter(Boolean).join(' ').trim();
+    if (attempt >= maxAttempts - 1 || cancelled || result?.signal || !isTransientProviderError(attemptError)) {
       return { handle, result, model: model ?? '(default)', exhausted: true };
     }
     try { options.onRetry?.(unique[attempt + 1], attemptError); } catch {}
     await backoff(attempt);
+    if (cancelled) return { handle, result, model: model ?? '(default)', exhausted: false };
   }
   return { handle: lastHandle, result: lastResult, model: unique[unique.length - 1] ?? '(default)', exhausted: true };
 }

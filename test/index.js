@@ -24,3 +24,7 @@ import './activeAgents.test.js';
 import './sound.test.js';
 import './goUsage.test.js';
 import './skills.test.js';
+import './coarena.test.js';
+import './agentModels.test.js';
+import './logFormat.test.js';
+import './profileConfig.test.js';

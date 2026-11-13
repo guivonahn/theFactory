@@ -26,7 +26,61 @@ thefactory
 
 ## Models and profiles
 
-The default lineup uses `opencode-go/*` models from OpenCode Go. An active
+`/config` has an **all agents** model row and seven independent agent model
+rows. Enter on a model row opens its picker, including Coarena Opus/Fable
+aliases for each configured key. ↑/↓ selects, Enter applies, and Esc cancels;
+←/→ on the configuration card still cycles models. A model edit creates or updates Custom,
+capturing all seven resolved models and the source preset's effort level.
+Untouched agents retain their exact models and variants, including when the
+source preset was Free. The all-agents row assigns all seven models together.
+Other settings do not create Custom.
+
+The profile row offers your saved Custom alongside the built-in presets.
+Selecting a preset preserves Custom; editing that preset replaces the Custom
+slot. The active selection, shared model, and complete Custom lineup persist
+in `$XDG_CONFIG_HOME/thefactory/config.json` (default
+`~/.config/thefactory/config.json`). Old `agent-models.json` choices migrate on
+first launch. `--profile` overrides the saved selection; `--profile custom`
+requires a saved Custom. Explicit model flags update Custom as well.
+
+Profile changes refresh the displayed models and variants immediately. Changes
+apply on the next task through private OpenCode processes, including parallel
+workers. Fallbacks are temporary and never save their models over Custom. A
+Coarena model first tries its other key, then the remaining fallback pool.
+With per-agent choices, a retry updates only the running agent's model.
+Coarena credentials make models available in the picker and fallback pool;
+they do not replace an explicitly selected preset's lineup.
+Custom derived from Free retains the free fallback pool; explicitly choosing a
+Coarena model additionally permits its normal key rotation.
+
+`/log` displays full formatted responses and structured tool input/output,
+timestamps, status, durations, and model/session details. It preserves code
+indentation and colors code, JSON, shell and diffs. Use `f` for All / Messages /
+Tools / Errors, Page Up/Down for paging, `g` / Home for oldest, `G` / End for
+latest, Space to pause/resume, ←/→ to select an agent, `0` for orchestrator, and
+`1`–`6` for pillars. Scrolling away from the bottom anchors the current rows
+while activity continues. Up to 500 entries per agent are retained. Tool
+content above 32,000 characters is visibly truncated. Usage totals appear only
+when OpenCode supplies them.
+
+When `.env` contains `COARENA_API_KEY_1` and/or `COARENA_API_KEY_2`, task mode
+prefers `coarena-1/claude-opus-5-5` (or key 2 if it is the only key). On a
+provider quota/rate-limit error it tries the other Opus credential, then
+`claude-fable-5-2` with each available credential, then the OpenCode Go pool
+below. Each task starts with Coarena again. The free profile excludes Coarena.
+Exports override `.env`, and duplicate credentials are tried only once per
+model. No key is written into the OpenCode configuration.
+
+The CLI uses OpenCode's native Anthropic runtime with
+`https://coarena.ai/api/v1` (this runtime appends `/messages`). It adds
+`coarena-1` / `coarena-2` to the global
+provider policy on first use and sends provider definitions and agent models
+through `OPENCODE_CONFIG_CONTENT` to private (`--standalone`) processes.
+All seven agents follow the current attempt's model, including during
+fallbacks and parallel tasks, without changing their saved global models.
+Custom fallback lists and disabling auto-fallback remain supported.
+
+Without Coarena keys, the default lineup uses `opencode-go/*` models from OpenCode Go. An active
 subscription and authentication through OpenCode's `/connect` command are
 required.
 
@@ -164,15 +218,17 @@ Typed in place of a task; they never spawn `opencode run`.
 
 ### Configuration card
 
-`/config` opens an editable card. Up/down selects a row; Enter or `→` changes it;
-`←` changes it backwards; `q` or Esc closes.
+`/config` opens an editable card. Up/down selects a row. Enter on a model row
+opens its model picker; Enter on other rows cycles their values. ←/→ cycles
+values directly, and `q` or Esc closes.
 
 | Row | Values |
 | --- | --- |
-| `model` | `(default)`, the user's custom model, then the OpenCode Go presets. Applies globally to all agents and the default. |
-| `profile` | `(default) → LOW → MEDIUM → HIGH → FREE`. |
+| `all agents` | Available Coarena, OpenCode Go, and free models. Editing creates Custom and assigns all seven agents. |
+| Agent rows | Independent base models. Editing creates Custom and keeps the other agents' models and the preset effort. |
+| `profile` | `(default) → LOW → MEDIUM → HIGH → FREE → CUSTOM` (Custom appears after it is created). |
 | `verbose` | `(default) → LOW → MEDIUM → HIGH`. |
-| `fallbacks` | `(none)`, single-model presets, then the user's custom list. |
+| `autoFallback` | ON / OFF. Manual lists can be set through `/fallback`. |
 | `auto` | ON / OFF. |
 | `parallel` | OFF / 3 workers / 4 workers / 6 workers. |
 | `sequential` | ON / OFF. |
@@ -181,8 +237,8 @@ Typed in place of a task; they never spawn `opencode run`.
 | `dir` | Read-only working directory. |
 | `session` | Read-only current session. |
 
-Changing `model` preserves the active paid profile. The free profile is cleared
-by an explicit model change because it pins every agent.
+Changing a model automatically saves Custom. Selecting a preset leaves that
+Custom slot available, and the last selected profile is restored on restart.
 
 ## Question forms
 

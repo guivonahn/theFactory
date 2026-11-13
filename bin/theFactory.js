@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { main } from '../src/main.js';
+import { loadCoarenaEnv } from '../src/coarena.js';
 
-main()
+Promise.resolve().then(() => { loadCoarenaEnv(); return main(); })
   .then((code) => {
     if (typeof code === 'number') process.exitCode = code;
   })

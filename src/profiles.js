@@ -7,6 +7,9 @@ const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const PROFILE_ORDER = ['low', 'medium', 'high', 'free'];
 export const PAID_PROFILE_ORDER = ['low', 'medium', 'high'];
+export function baseProfile(options = {}) {
+  return options.profile === 'custom' ? options.customProfile?.baseProfile ?? null : options.profile ?? null;
+}
 export const VARIANT_ORDER = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 // A free-only profile: every agent must run on an `opencode/*-free` model, so

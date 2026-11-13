@@ -4,12 +4,13 @@
  */
 
 import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './agents.js';
-import { Canvas, displayWidth, truncate, wrapText } from './canvas.js';
+import { Canvas, displayWidth, stripAnsi, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
 import { buildLayout } from './layout.js';
 import { highlightLine } from './highlight.js';
 import { formatReset } from './goUsage.js';
 import { drawFactory } from '../workin_on/factory.js';
+import { formatLogEntries, LOG_FILTERS, logMatches } from './logFormat.js';
 import {
   createQuestionState,
   currentField,
@@ -26,7 +27,8 @@ const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
 
 /** Config overlay rows in display order; editable rows respond to enter/arrows. */
 const CONFIG_ROWS = [
-  { key: 'model', label: 'model', editable: true },
+  { key: 'model', label: 'all agents', editable: true },
+  ...['orchestrator', ...AGENT_ORDER].map((key) => ({ key: `agent:${key}`, label: key, editable: true })),
   { key: 'profile', label: 'profile', editable: true },
   { key: 'verbose', label: 'verbose', editable: true },
   { key: 'autoFallback', label: 'autoFallback', editable: true },
@@ -101,8 +103,14 @@ export class App {
     this.centerFlashUntil = 0;
     this.centerFlashColor = T.textPrimary;
     this.centerLog = [];
-    this.logView = { open: false, agentKey: 'orchestrator', scroll: 0 };
-    this.configView = { open: false, selected: 'model', info: {} };
+    this.orchestratorHistory = [];
+    this.logRevision = 0;
+    this.logCache = null;
+    this.logEntryCache = new WeakMap();
+    this.agentRuntime = new Map();
+    this.logView = { open: false, agentKey: 'orchestrator', scroll: 0, filter: 'all', paused: false };
+    this.configView = { open: false, selected: 'model', scroll: 0, info: {} };
+    this.modelPicker = { open: false, key: null, models: [], selected: 0, scroll: 0 };
     this.imageView = { open: false, image: null };
     this.questionView = { open: false };
     this.sessionID = null;
@@ -178,17 +186,22 @@ export class App {
   }
 
   /** Keep a small orchestrator log (20 entries max) for task mode. */
-  addLog(text) {
-    const line = String(text ?? '')
-      .replace(/\r\n/g, '\n')
-      .split('\n')
-      .map((part) => part.replace(/[ \t]+/g, ' ').trim())
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+  addLog(text, metadata = {}) {
+    const line = stripAnsi(text).replace(/\r\n/g, '\n');
     if (!line) return;
     this.centerLog.push(line);
     if (this.centerLog.length > 20) this.centerLog.shift();
+    this._appendLog(this.orchestratorHistory, { kind: 'status', at: this.now, ...metadata, text: line });
+  }
+
+  setAgentRuntime(agent, info) {
+    this.agentRuntime.set(agent, { ...this.agentRuntime.get(agent), ...info });
+  }
+
+  recordAgentLog(agent, entry) {
+    if (agent === 'orchestrator') this.addLog(entry.text, entry);
+    else this._pushHistory(this.agents.get(this._agentKey(agent)), { at: this.now, ...entry });
+    if (entry.model || entry.sessionID) this.setAgentRuntime(agent, { ...(entry.model ? { model: entry.model } : {}), ...(entry.sessionID ? { sessionID: entry.sessionID } : {}) });
   }
 
   /** Open the per-agent log overlay for the given agent key. */
@@ -197,6 +210,7 @@ export class App {
     this.logView.open = true;
     this.logView.agentKey = key;
     this.logView.scroll = 0;
+    this.logView.paused = false;
   }
 
   /** Map a terminal (1-based) click to an agent whose msg counter was hit. */
@@ -225,12 +239,12 @@ export class App {
   openConfig(info = {}) {
     this.configView.info = { ...info };
     this.configView.selected = 'model';
+    this.configView.scroll = 0;
     this.configView.open = true;
   }
 
   /** Update the config overlay's settings snapshot without opening/closing it. */
   updateConfigInfo(info = {}) {
-    if (!this.configView.open) return;
     this.configView.info = { ...info };
   }
 
@@ -247,6 +261,24 @@ export class App {
   /** Close the config overlay. */
   closeConfig() {
     this.configView.open = false;
+    this.modelPicker.open = false;
+  }
+
+  openModelPicker(key, models, current) {
+    const selected = models.indexOf(current?.split('#')[0] ?? null);
+    this.modelPicker = { open: true, key, models, selected: Math.max(0, selected), scroll: 0 };
+  }
+
+  moveModelPicker(delta) {
+    const picker = this.modelPicker;
+    if (picker.models.length) picker.selected = (picker.selected + delta + picker.models.length * 2) % picker.models.length;
+  }
+
+  closeModelPicker() { this.modelPicker.open = false; }
+
+  modelPickerChoice() {
+    const { key, models, selected } = this.modelPicker;
+    return { key, model: models[selected] };
   }
 
   /** Open a pending OpenCode form without coupling the view to API transport. */
@@ -285,34 +317,62 @@ export class App {
     const next = (index + (dir < 0 ? -1 : 1) + order.length) % order.length;
     this.logView.agentKey = order[next];
     this.logView.scroll = 0;
+    this.logView.paused = false;
   }
 
   /** Scroll the log overlay by delta lines (negative = toward the bottom). */
   scrollLog(delta) {
     // scroll = how many entries up from the newest (0 shows latest at bottom).
-    this.logView.scroll = Math.max(0, (this.logView.scroll | 0) - Math.trunc(delta));
+    this.logView.scroll = Math.max(0, this.logView.scroll - Math.trunc(delta));
+  }
+
+  cycleLogFilter() {
+    this.logView.filter = LOG_FILTERS[(LOG_FILTERS.indexOf(this.logView.filter) + 1) % LOG_FILTERS.length];
+    this.logView.scroll = 0;
+    this.logCache = null;
+  }
+
+  jumpLog(latest = true) {
+    this.logView.scroll = latest ? 0 : Number.MAX_SAFE_INTEGER;
+    this.logView.paused = !latest;
+  }
+
+  toggleLogFollow() {
+    if (this.logView.paused || this.logView.scroll > 0) { this.logView.paused = false; this.logView.scroll = 0; }
+    else this.logView.paused = true;
   }
 
   /** Entries for the selected log-view agent (orchestrator uses centerLog). */
   _logEntries() {
     const key = this.logView.agentKey;
-    if (key === 'orchestrator') {
-      const entries = [...this.centerLog];
-      if (this.activity) entries.push(this.activity);
-      return entries;
-    }
-    const state = this.agents.get(key);
-    return state ? state.history.map((entry) => {
-      if (entry.kind === 'tool') return `⚒ ${entry.text}`;
-      if (entry.kind === 'status') return `• ${entry.text}`;
-      return `${entry.dir === 'in' ? '«' : '»'} ${entry.text}`;
-    }) : [];
+    const entries = key === 'orchestrator' ? this.orchestratorHistory : this.agents.get(key)?.history ?? [];
+    return entries.filter((entry) => logMatches(entry, this.logView.filter));
   }
 
   /** Visible wrapped log rows for the overlay (shared by _drawLog and tests). */
   _logLines(visibleRows) {
-    const boxWidth = Math.max(24, Math.min(this.width - 4, Math.floor(this.width * 0.7)));
-    const lines = this._logEntries().flatMap((entry) => wrapText(entry, boxWidth - 4));
+    return this._logRows(visibleRows).map((line) => line.text);
+  }
+
+  _logRows(visibleRows) {
+    const width = this.width - 8;
+    const key = `${this.logView.agentKey}:${this.logView.filter}:${width}`;
+    if (!this.logCache || this.logCache.key !== key || this.logCache.revision !== this.logRevision) {
+      const previous = this.logCache;
+      const lines = this._logEntries().flatMap((entry) => {
+        let cached = this.logEntryCache.get(entry);
+        if (!cached || cached.width !== width) {
+          cached = { width, lines: formatLogEntries([entry], width) };
+          this.logEntryCache.set(entry, cached);
+        }
+        return cached.lines;
+      });
+      if (previous?.key === key && (this.logView.scroll > 0 || this.logView.paused)) {
+        this.logView.scroll += Math.max(0, lines.length - previous.lines.length);
+      }
+      this.logCache = { key, revision: this.logRevision, lines };
+    }
+    const lines = this.logCache.lines;
     const maxScroll = Math.max(0, lines.length - Math.max(1, visibleRows));
     const scroll = Math.min(this.logView.scroll, maxScroll);
     this.logView.scroll = scroll;
@@ -468,8 +528,15 @@ export class App {
   /** Append one entry to an agent's full history (cap 500). */
   _pushHistory(state, entry) {
     if (!state) return;
-    state.history.push(entry);
-    if (state.history.length > 500) state.history.shift();
+    this._appendLog(state.history, entry);
+  }
+
+  _appendLog(history, entry) {
+    const existing = entry.id ? history.findIndex((record) => record.id === entry.id) : -1;
+    if (existing >= 0) history[existing] = { ...history[existing], ...entry };
+    else history.push(entry);
+    if (history.length > 500) history.shift();
+    this.logRevision += 1;
   }
 
   _spawn(path, color, options = {}) {
@@ -511,7 +578,8 @@ export class App {
     if (!text) return;
 
     this._addMessage(state, dir, text);
-    this._pushHistory(state, { dir, text, kind: 'msg', at: this.now });
+    if (!event.logRecorded) this._pushHistory(state, { dir, text: stripAnsi(event.text), kind: 'msg', at: this.now, ...event.logEntry });
+    if (event.logEntry?.model) this.setAgentRuntime(key, { model: event.logEntry.model });
     this.totalMessages += 1;
     this.totalTokens += Math.max(1, Math.ceil(text.length / 4));
     // Real payload size in bytes drives the KB node count downstream.
@@ -535,6 +603,7 @@ export class App {
     const key = this._agentKey(event.from ?? event.agent ?? 'other');
     if (key === 'orchestrator') {
       const detail = clean(event.text);
+      if (!event.logRecorded) this.addLog(event.logEntry?.text ?? event.text, { kind: 'tool', ...event.logEntry });
       this.totalTools += 1;
       this.totalKb += 1;
       this.centerFlashUntil = this.now + 220;
@@ -569,7 +638,8 @@ export class App {
     this.totalTools += 1;
     this.totalKb += 1;
     const detail = clean(event.text);
-    this._pushHistory(state, { dir: 'tool', text: detail || 'running tool', kind: 'tool', at: this.now });
+    if (!event.logRecorded) this._pushHistory(state, { dir: 'tool', text: stripAnsi(event.text) || 'running tool', kind: 'tool', at: this.now, ...event.logEntry });
+    if (event.logEntry?.model) this.setAgentRuntime(key, { model: event.logEntry.model });
     this.activity = `${state.def.label.toLowerCase()}: ${detail || 'running tool'}`;
 
     const slot = this._slotFor(key);
@@ -594,14 +664,14 @@ export class App {
     if (event.from === ORCHESTRATOR.key || !event.from) {
       if (text) this.activity = text;
       this.centerFlashUntil = this.now + 180;
-      if (text) this.addLog(text);
+      if (text && !event.logRecorded) this.addLog(event.logEntry?.text ?? event.text, event.logEntry);
       return;
     }
     const key = this._agentKey(event.from);
     const state = this.agents.get(key);
     if (!state) return;
     if (key === 'other') this.showOther = true;
-    if (text) this._pushHistory(state, { dir: 'status', text, kind: 'status', at: this.now });
+    if (text && !event.logRecorded) this._pushHistory(state, { dir: 'status', text: stripAnsi(event.text), kind: 'status', at: this.now, ...event.logEntry });
     const lowered = text.toLowerCase();
     // Explicit terminal state wins first, then keyword heuristics. Failure
     // keywords must settle to idle — previously any unknown status text fell
@@ -944,8 +1014,9 @@ export class App {
   /** Paint the log overlay on top of everything (only when open). */
   _drawLog() {
     if (!this.logView.open) return;
-    const boxWidth = Math.max(24, Math.min(this.width - 4, Math.floor(this.width * 0.7)));
-    const boxHeight = Math.max(8, Math.min(this.height - 4, Math.floor(this.height * 0.7)));
+    this.canvas.clear();
+    const boxWidth = this.width - 4;
+    const boxHeight = this.height - 4;
     const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
     const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
     const key = this.logView.agentKey;
@@ -955,40 +1026,48 @@ export class App {
     const entries = this._logEntries();
     const live = this.run.state === 'running'
       || [...this.agents.values()].some((state) => state.status === 'working');
-    const liveMarker = live ? `${this._spinner()} live · ` : '';
+    const following = !this.logView.paused && this.logView.scroll === 0;
+    const liveMarker = live && following ? 'LIVE' : following ? 'LATEST' : 'PAUSED';
+    const runtime = this.agentRuntime.get(key) ?? {};
+    const settings = this.configView.info;
+    const model = runtime.model ?? settings.agentModels?.[key] ?? settings.model ?? '(OpenCode default)';
+    const state = key === 'orchestrator' ? this.run.state : this.agents.get(key)?.status ?? 'idle';
+    const session = runtime.sessionID ?? this.sessionID ?? this.run.sessionID;
     // Clear the overlay so the underlying frame does not bleed through.
     this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
-    this.canvas.box(row, col, boxWidth, boxHeight, T.textPrimary, `LOG: ${label}`);
+    this.canvas.box(row, col, boxWidth, boxHeight, key === 'orchestrator' ? ORCHESTRATOR.color : this.agents.get(key)?.def.color ?? T.border, `LOG: ${label}`);
     this.canvas.write(
       row + 1,
       col + 2,
-      truncate(`${liveMarker}${entries.length} entries · ←/→ agent · ↑/↓ scroll · 1-6 pillars · esc close`, boxWidth - 4),
+      truncate(`${entries.length} entries · ${this.logView.filter.toUpperCase()} · ${liveMarker} · ${state}`, boxWidth - 4),
       T.textSecondary,
     );
-    const visibleRows = Math.max(1, boxHeight - 4);
-    const lines = this._logLines(visibleRows);
+    this.canvas.write(row + 2, col + 2, truncate(`model ${model}`, boxWidth - 4), T.info);
+    this.canvas.write(row + 3, col + 2, truncate(session ? `session ${session}` : 'Session starts with the next task', boxWidth - 4), T.textSecondary);
+    const visibleRows = Math.max(1, boxHeight - 6);
+    const lines = this._logRows(visibleRows);
     lines.forEach((line, index) => {
-      this._writeHighlighted(row + 2 + index, col + 2, line, boxWidth - 4, T.textPrimary);
+      let cursor = col + 2;
+      for (const segment of line.segments) cursor = this.canvas.write(row + 4 + index, cursor, segment.text, segment.style);
     });
     if (lines.length === 0) {
-      this._writeHighlighted(row + 2, col + 2, '(no messages yet)', boxWidth - 4, T.textMuted);
+      this.canvas.write(row + 4, col + 2, truncate(`No ${this.logView.filter === 'all' ? 'events yet. Run a task to see activity.' : `${this.logView.filter}. Press f to change the filter.`}`, boxWidth - 4), T.textSecondary);
     }
-    this._writeHighlighted(
-      row + boxHeight - 1,
-      col + 2,
-      truncate('←/→ agent · ↑/↓ scroll · esc close · 1-6 pillars', boxWidth - 4),
-      boxWidth - 4,
-      T.textSecondary,
-    );
+    const help = this.width >= 100
+      ? '←/→ agent · ↑/↓ scroll · PgUp/Dn · f filter · g/G top/latest · space pause · esc close'
+      : '←/→ agent  ↑/↓ scroll  f filter  G latest  esc close';
+    this.canvas.write(row + boxHeight - 2, col + 2, truncate(help, boxWidth - 4), T.textSecondary);
   }
 
   /** Paint the config overlay on top of everything (only when open). */
   _drawConfig() {
     if (!this.configView.open) return;
+    if (this.modelPicker.open) { this._drawModelPicker(); return; }
+    this.canvas.clear();
     const info = this.configView.info ?? {};
     const values = {
       model: info.model || '(default)',
-      profile: info.profile || '(default)',
+      profile: info.profile === 'custom' ? `custom (${info.customBaseProfile || 'default'})` : info.profile || '(default)',
       verbose: info.verbosity ? info.verbosity.toUpperCase() : '(default)',
       autoFallback: info.autoFallback ? `ON (${(info.fallbackModels || []).length} models)` : 'OFF',
       auto: info.auto ? 'ON' : 'OFF',
@@ -1000,6 +1079,10 @@ export class App {
       dir: info.dir || process.cwd(),
       session: info.session || '(new on next task)',
     };
+    for (const agent of ['orchestrator', ...AGENT_ORDER]) {
+      values[`agent:${agent}`] = info.effectiveAgentModels?.[agent]
+        || info.agentModels?.[agent] || '(shared/default)';
+    }
     const labelWidth = Math.max(...CONFIG_ROWS.map((row) => row.label.length));
     const lines = CONFIG_ROWS.map((row) => {
       const cursor = row.key === this.configView.selected ? '›' : ' ';
@@ -1007,7 +1090,15 @@ export class App {
       return `${cursor} ${row.label.padEnd(labelWidth)}  ${values[row.key]}${suffix}`;
     });
     const boxWidth = Math.max(36, Math.min(this.width - 4, Math.max(...lines.map((line) => line.length)) + 6));
-    const boxHeight = lines.length + 4;
+    const boxHeight = Math.min(this.height - 2, lines.length + 4);
+    const visibleRows = Math.max(1, boxHeight - 4);
+    const selectedIndex = CONFIG_ROWS.findIndex((def) => def.key === this.configView.selected);
+    let scroll = this.configView.scroll;
+    if (selectedIndex < scroll) scroll = selectedIndex;
+    if (selectedIndex >= scroll + visibleRows) scroll = selectedIndex - visibleRows + 1;
+    if (selectedIndex === CONFIG_ROWS.findLastIndex((def) => def.editable)) scroll = Math.max(0, lines.length - visibleRows);
+    scroll = Math.max(0, Math.min(scroll, lines.length - visibleRows));
+    this.configView.scroll = scroll;
     const row = Math.max(1, Math.floor((this.height - boxHeight) / 2));
     const col = Math.max(1, Math.floor((this.width - boxWidth) / 2));
     // Clear the overlay so the underlying frame does not bleed through.
@@ -1016,19 +1107,47 @@ export class App {
     this.canvas.write(
       row + 1,
       col + 2,
-      truncate('↑/↓ select · ↵/→ change · ← previous · q/esc close', boxWidth - 4),
+      truncate('↑/↓ row · enter models · ←/→ cycle · esc close', boxWidth - 4),
       T.textSecondary,
     );
-    lines.forEach((line, index) => {
-      const def = CONFIG_ROWS[index];
+    lines.slice(scroll, scroll + visibleRows).forEach((line, index) => {
+      const def = CONFIG_ROWS[scroll + index];
       const selected = def.key === this.configView.selected;
       const color = !def.editable
         ? T.textMuted
         : selected
           ? T.textPrimary
           : T.textSecondary;
-      this.canvas.write(row + 2 + index, col + 2, truncate(line, boxWidth - 4), color);
+      const prefix = `${selected ? '›' : ' '} ${def.label.padEnd(labelWidth)}  `;
+      const value = `${values[def.key]}${def.editable ? '' : ' (read-only)'}`;
+      this.canvas.write(row + 2 + index, col + 2, prefix, color);
+      this.canvas.write(row + 2 + index, col + 2 + displayWidth(prefix), truncate(value, boxWidth - 4 - displayWidth(prefix)), color);
     });
+    const scope = this.configView.selected === 'model' ? 'Changes ALL agents' : this.configView.selected.startsWith('agent:') ? `${this.configView.selected.slice(6)} only` : 'Saved · next task';
+    this.canvas.write(row + boxHeight - 2, col + 2, truncate(`Rows ${scroll + 1}-${Math.min(lines.length, scroll + visibleRows)}/${lines.length} · ${scope}`, boxWidth - 4), T.textSecondary);
+  }
+
+  _drawModelPicker() {
+    this.canvas.clear();
+    const picker = this.modelPicker;
+    const width = Math.min(this.width - 4, 78);
+    const height = Math.min(this.height - 2, picker.models.length + 4);
+    const visible = Math.max(1, height - 4);
+    if (picker.selected < picker.scroll) picker.scroll = picker.selected;
+    if (picker.selected >= picker.scroll + visible) picker.scroll = picker.selected - visible + 1;
+    const row = Math.max(1, Math.floor((this.height - height) / 2));
+    const col = Math.floor((this.width - width) / 2);
+    const target = picker.key === 'model' ? 'ALL AGENTS' : picker.key.slice(6).toUpperCase();
+    this.canvas.box(row, col, width, height, T.border, `Base model: ${target}`);
+    this.canvas.write(row + 1, col + 2, truncate('↑/↓ choose · enter apply · esc cancel', width - 4), T.textSecondary);
+    picker.models.slice(picker.scroll, picker.scroll + visible).forEach((model, index) => {
+      const selected = index + picker.scroll === picker.selected;
+      const label = model ?? 'Use the all-agent model';
+      this.canvas.write(row + 2 + index, col + 2, selected ? '› ' : '  ', T.textPrimary);
+      this.canvas.write(row + 2 + index, col + 4, truncate(label, width - 6), selected ? T.textPrimary : model?.startsWith('coarena-') ? T.info : T.textSecondary);
+    });
+    const scope = picker.key === 'model' ? 'Applies to all seven agents' : `Only ${picker.key.slice(6)} will change`;
+    this.canvas.write(row + height - 2, col + 2, truncate(`${picker.selected + 1}/${picker.models.length} · ${scope}`, width - 4), T.textSecondary);
   }
 
   /** Paint the most recently detected image (Apple Terminal shows its path). */

@@ -11,6 +11,8 @@
 import { launchRunWithFallback } from './run.js';
 import { createEventBus } from './events.js';
 import { skillPrompt } from './skills.js';
+import { usesCoarena } from './coarena.js';
+import { hasAgentModels } from './agentModels.js';
 
 let workerSeq = 0;
 
@@ -40,6 +42,7 @@ export function createWorkerManager(options = {}) {
   function workerId() { return `w_${Date.now()}_${(workerSeq += 1)}`; }
 
   function nextModel(requested, idx) {
+    if (usesCoarena(options) || hasAgentModels(options)) return requested ?? options.model;
     const fallbacks = options.fallbackModels ?? [];
     // Selector: requested model first, then fallbacks in order (bounded 8).
     const pool = [requested, ...fallbacks].filter(Boolean).slice(0, 8);
@@ -51,7 +54,7 @@ export function createWorkerManager(options = {}) {
     if (!task?.id) throw new Error('task id is required');
     const id = workerId();
     const role = task.agent ?? 'orchestrator';
-    const resolved = nextModel(model ?? options.model, workers.size);
+    const resolved = nextModel(options.agentModels?.[role] ?? model ?? options.model, workers.size);
     const record = {
       workerId: id, runId: runId ?? null, taskId: task.id, role, model: resolved ?? null,
       dir: dir ?? process.cwd(), sessionId: null, pid: null,
@@ -73,11 +76,14 @@ export function createWorkerManager(options = {}) {
       task: prompt,
       agent: role,
       model: resolved,
+      coarena: usesCoarena(options),
+      agentModels: options.agentModels,
+      autoFallback: options.autoFallback,
       fallbackModels: options.fallbackModels ?? [],
       dir: record.dir,
       bin,
       auto,
-      onSpawn: (pid) => { record.pid = pid; bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'started', text: `pid ${pid}`, meta: { pid } }); },
+      onSpawn: (pid) => { record.pid = pid; bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'started', text: `pid ${pid}`, meta: { pid, model: record.model } }); },
       onSessionID: (sid) => {
         record.sessionId = sid;
         bus.publish({ runId, workerId: id, taskId: task.id, sessionId: sid, kind: 'session', text: sid });
@@ -86,10 +92,11 @@ export function createWorkerManager(options = {}) {
         if (parsed.sessionID && !record.sessionId) record.sessionId = parsed.sessionID;
         if (parsed.text) record.output = parsed.text;
         if (parsed.error) record.error = parsed.error;
+        if (parsed.logEntry) bus.publish({ runId, workerId: id, taskId: task.id, kind: 'log', meta: { logEntry: { ...parsed.logEntry, model: record.model } } });
         for (const ev of parsed.events ?? []) {
-          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { fanout: !!ev.fanout, to: ev.to ?? null } });
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { fanout: !!ev.fanout, to: ev.to ?? null, logRecorded: Boolean(parsed.logEntry) } });
         }
-        if (parsed.diff) {
+        if (parsed.diff && !parsed.logEntry) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: 'status', text: parsed.diff });
         }
         if (parsed.permission) {
@@ -100,12 +107,10 @@ export function createWorkerManager(options = {}) {
         }
       },
       onHandle: (h) => { record.handle = h; },
-      onRetry: (nextModel, reason) => { record.error = `retrying: ${reason}`; bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `retrying on ${nextModel}` }); },
+      onRetry: (nextModel, reason) => { record.model = nextModel; record.error = `retrying: ${reason}`; bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `retrying on ${nextModel}`, meta: { model: nextModel } }); },
       onError: (error) => { record.error = String(error?.message ?? error); },
     });
 
-    record.handle = null;
-    record.handle = null;
     record.state = 'running';
     bus.publish({ runId, workerId: id, taskId: task.id, kind: 'worker-started', text: `${role} worker ${id} started` });
 
@@ -114,9 +119,11 @@ export function createWorkerManager(options = {}) {
       const result = launched?.result;
       record.handle = launched?.handle ?? record.handle;
       record.finishedAt = Date.now();
-      if (result?.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
-      else if (result?.code === 0) record.state = 'completed';
-      else { record.state = 'failed'; record.error = record.error ?? `exit ${result?.code}`; }
+      if (record.state !== 'cancelled') {
+        if (result?.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
+        else if (result?.code === 0) { record.state = 'completed'; record.error = null; record.model = launched.model; }
+        else { record.state = 'failed'; record.error = record.error ?? `exit ${result?.code}`; }
+      }
       bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: record.state, text: `${record.state}: ${task.id}`, meta: { code: result?.code ?? null } });
       return record;
     })();

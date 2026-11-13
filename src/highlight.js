@@ -97,3 +97,25 @@ export function highlightLine(text, baseStyle = T.textPrimary) {
   if (last < line.length) push(line.slice(last), baseStyle);
   return segments;
 }
+
+/** Small, dependency-free lexer for code blocks, JSON, shell, and diffs. */
+export function highlightCode(text, language = '') {
+  const line = String(text ?? '');
+  if (/^diff$/i.test(language)) {
+    if (/^\+/.test(line)) return [{ text: line, style: T.success }];
+    if (/^-/.test(line)) return [{ text: line, style: T.error }];
+    if (/^@@/.test(line)) return [{ text: line, style: T.info }];
+  }
+  const tokens = /(?<comment>\/\/.*$|\/\*.*?\*\/|^\s*#.*$|--\s.*$)|(?<string>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(?<keyword>\b(?:const|let|var|function|return|async|await|import|export|from|if|else|for|while|class|new|throw|try|catch|def|self|None|True|False|true|false|null|undefined|SELECT|FROM|WHERE|JOIN|INSERT|UPDATE|DELETE|CREATE|TABLE|AND|OR|NOT|IN|AS|LIMIT|ORDER|BY|public|private|static|interface|type|extends|implements|package|func|defer|go|struct|echo|export|fi|then|do|done)\b)|(?<number>\b(?:0x[\da-f]+|\d+(?:\.\d+)?)\b)|(?<call>\b[A-Za-z_$][\w$]*(?=\s*\())/giu;
+  const segments = [];
+  let end = 0;
+  for (const match of line.matchAll(tokens)) {
+    if (match.index > end) segments.push({ text: line.slice(end, match.index), style: T.textPrimary });
+    const g = match.groups;
+    const style = g.comment ? T.textSecondary : g.string ? T.success : g.number ? HIGHLIGHT_STYLES.number : g.call ? T.info : HIGHLIGHT_STYLES.path;
+    segments.push({ text: match[0], style });
+    end = match.index + match[0].length;
+  }
+  if (end < line.length) segments.push({ text: line.slice(end), style: T.textPrimary });
+  return segments;
+}

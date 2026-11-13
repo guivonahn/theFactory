@@ -69,14 +69,14 @@ test('App log wraps long entries into visual rows and clamps scroll over them', 
 
   const wrapped = app._logLines(20);
   assert.ok(wrapped.length > 1, 'long entry occupies multiple visual rows');
-  assert.ok(wrapped[0].startsWith('« '), 'entry marker stays on the first row');
-  assert.ok(wrapped.slice(1).every((line) => !line.startsWith('« ')));
-  assert.ok(wrapped.at(-1).includes('word35'));
+  assert.match(wrapped[0], /RESPONSE/, 'entry has a typed header');
+  assert.equal(wrapped.filter((line) => line.includes('RESPONSE')).length, 1);
+  assert.match(wrapped.join('\n'), /word35/);
 
   const snapshot = app.snapshot().split('\n');
   const header = snapshot.findIndex((line) => line.includes('LOG: DEVELOPER'));
   assert.match(snapshot[header + 1], /1 entries/);
-  const body = snapshot.slice(header + 2, header + 20);
+  const body = snapshot.slice(header + 4, header + 24);
   assert.ok(body.every((line) => !line.includes('…')));
   assert.match(body.join('\n'), /word35/);
 

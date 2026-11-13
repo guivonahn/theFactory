@@ -32,11 +32,14 @@ import {
 } from './sessionState.js';
 import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
 import { loadSkills, createSkillRegistry } from './skills.js';
-import { PROFILE_ORDER, applyProfileToAllAgents, FREE_FALLBACK_MODELS } from './profiles.js';
+import { baseProfile, PROFILE_ORDER, applyProfileToAllAgents, FREE_FALLBACK_MODELS } from './profiles.js';
 import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
 import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
 import { apiRequest, formAnswerBody } from './opencodeApi.js';
 import { openExternalCommand } from './media.js';
+import { coarenaModels, ensureCoarenaPolicy, syncModelRouting, usesCoarena } from './coarena.js';
+import { effectiveAgentModels, hasAgentModels, loadAgentModels, MODEL_AGENT_KEYS, resolvedModelConfig, syncProfileModel } from './agentModels.js';
+import { customizeModel, loadProfileConfig, restoreProfileConfig, saveProfileConfig, selectProfile } from './profileConfig.js';
 import {
   VOLUME_PRESETS,
   createSoundPlayer,
@@ -72,7 +75,7 @@ Flags:
   --new / --fresh        task mode: ignore the persisted session and start brand-new
   --dir <path>           prefer sessions in this directory; task cwd
   --model <model#var>    forwarded to opencode run as -m
-  --profile <profile>    apply a low, medium, high, or free model profile in /config
+  --profile <profile>    select low, medium, high, free, or your saved custom profile
   --verbosity <level>    set agent verbosity: low, medium, or high (lower talks less, saves tokens)
   --fallback-models <csv> comma-separated fallback models tried in order on quota/no-route (bounded, env FACTORY_FALLBACK_MODELS)
   --auto                 auto-approve opencode ask permissions via --auto (explicit opt-in for trusted unattended only; deny stays enforced)
@@ -146,6 +149,15 @@ export const GO_MODEL_IDS = [
   'opencode-go/minimax-m3',
 ];
 
+export function configModelChoices(options, key, { env = process.env, model } = {}) {
+  return [...new Set([
+    ...(key.startsWith('agent:') ? [null] : []),
+    ...coarenaModels(env), ...GO_MODEL_IDS, ...FREE_FALLBACK_MODELS,
+    ...Object.values(options.agentModels ?? {}).map((id) => id.split('#')[0]),
+    ...[options.model, model].filter(Boolean).map((id) => id.split('#')[0]),
+  ])];
+}
+
 /**
  * Cycle one /config card row's value on `options` (mutates in place, matching
  * the /fallback command's live-edit pattern). `memory` carries the user's own
@@ -154,19 +166,27 @@ export const GO_MODEL_IDS = [
  */
 export function cycleConfigValue(options, key, dir = 1, memory = {}) {
   const step = dir < 0 ? -1 : 1;
+  if (key.startsWith('agent:') && MODEL_AGENT_KEYS.includes(key.slice(6))) {
+    const agent = key.slice(6);
+    const current = options.agentModels?.[agent] ?? memory.agentModels?.[agent]?.split('#')[0] ?? null;
+    const cycle = configModelChoices(options, key, memory);
+    const next = cycle[(Math.max(0, cycle.indexOf(current)) + step + cycle.length) % cycle.length];
+    customizeModel(options, agent, next, memory.resolved ?? resolvedModelConfig(options));
+    return effectiveAgentModels(options)[agent];
+  }
   if (key === 'model') {
-    const custom = typeof memory.model === 'string' ? memory.model : null;
-    const cycle = [...(custom ? [custom] : []), null, ...GO_MODEL_IDS];
-    const index = cycle.indexOf(options.model ?? null);
-    const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
-    options.model = next;
-    return next ?? '(default)';
+    const cycle = configModelChoices(options, key, memory);
+    let index = cycle.indexOf(options.model?.split('#')[0]);
+    if (index < 0) index = step > 0 ? -1 : 0;
+    const next = cycle[(index + step + cycle.length) % cycle.length];
+    customizeModel(options, 'model', next, memory.resolved ?? resolvedModelConfig(options));
+    return options.model ?? '(default)';
   }
   if (key === 'profile') {
-    const cycle = [null, ...PROFILE_ORDER];
+    const cycle = [null, ...PROFILE_ORDER, ...(options.customProfile ? ['custom'] : [])];
     const index = cycle.indexOf(options.profile ?? null);
     const next = cycle[(Math.max(0, index) + step + cycle.length) % cycle.length];
-    options.profile = next;
+    selectProfile(options, next);
     return next ? next.toUpperCase() : '(default)';
   }
   if (key === 'verbose') {
@@ -235,7 +255,9 @@ export function parseArgs(argv) {
     packetSpeed: 400,
     fast: false,
     model: null,
+    modelExplicit: false,
     profile: null,
+    profileExplicit: false,
     verbosity: null,
     auto: false,
     graphify: true,
@@ -256,7 +278,10 @@ export function parseArgs(argv) {
   };
   // Env fallback selector (comma-separated, no spaces needed).
   const envFallback = process.env.FACTORY_FALLBACK_MODELS;
-  if (envFallback) options.fallbackModels = parseModelList(envFallback);
+  if (envFallback) {
+    options.fallbackModels = parseModelList(envFallback);
+    options.autoFallback = false;
+  }
   if (process.env.FACTORY_GRAPHIFY === '0') options.graphify = false;
   if (process.env.FACTORY_MOUSE === '1') options.mouse = true;
   if (process.env.FACTORY_AUTO_FALLBACK === '0') options.autoFallback = false;
@@ -293,13 +318,15 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--model') {
       options.model = requireValue(argv, index, arg);
+      options.modelExplicit = true;
       index += 1;
     } else if (arg === '--profile') {
       const profile = requireValue(argv, index, arg);
-      if (!PROFILE_ORDER.includes(profile)) {
-        throw new Error('--profile expects low, medium, high, or free');
+      if (!PROFILE_ORDER.includes(profile) && profile !== 'custom') {
+        throw new Error('--profile expects low, medium, high, or free (or a saved custom profile)');
       }
       options.profile = profile;
+      options.profileExplicit = true;
       index += 1;
     } else if (arg === '--verbosity') {
       const verbosity = requireValue(argv, index, arg);
@@ -310,6 +337,7 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--fallback-models') {
       options.fallbackModels = parseModelList(requireValue(argv, index, arg));
+      options.autoFallback = false;
       index += 1;
     } else if (arg === '--opencode') {
       options.opencode = requireValue(argv, index, arg);
@@ -403,9 +431,9 @@ export function parseModelList(csv) {
  * nolimit toggle, or an OC-NOLIMIT primary/fallback model. Go-only runs never
  * pay the proxy startup cost or fail because Bun is missing.
  */
-export function usesNolimit({ model, fallbackModels, nolimit } = {}) {
+export function usesNolimit({ model, agentModels, fallbackModels, nolimit } = {}) {
   if (nolimit) return true;
-  const models = [model, ...(Array.isArray(fallbackModels) ? fallbackModels : [])];
+  const models = [model, ...Object.values(agentModels ?? {}), ...(Array.isArray(fallbackModels) ? fallbackModels : [])];
   return models.some((entry) => typeof entry === 'string' && entry.startsWith('OC-NOLIMIT/'));
 }
 
@@ -568,6 +596,11 @@ async function runTui(mode, options) {
     return 1;
   }
 
+  const requestedModel = options.modelExplicit ? options.model : null;
+  const savedProfile = mode === 'task' ? loadProfileConfig() : null;
+  const legacyModels = mode === 'task' ? loadAgentModels() : {};
+  if (mode === 'task') restoreProfileConfig(options, savedProfile, legacyModels);
+
   const app = new App({
     width,
     height,
@@ -592,16 +625,22 @@ async function runTui(mode, options) {
   // first task, so the next `opencode run` picks them up. Failures are logged
   // (never fatal) because the TUI still works with the existing config.
   if (mode === 'task') {
-    if (options.profile) {
+    if (options.profile && options.profile !== 'custom') {
       const applied = applyProfileToAllAgents(options.profile);
+      if (applied.ok) syncProfileModel(options);
       app.addLog(applied.ok
         ? `profile ${options.profile} · applied to ${applied.agents} agent(s) + default`
         : `! profile ${options.profile} · ${applied.error ?? 'apply failed'}`);
     }
-    if (options.autoFallback) {
-      const isFree = options.profile === 'free';
-      const pool = isFree ? [...FREE_FALLBACK_MODELS] : [...GO_MODEL_IDS];
-      options.fallbackModels = pool.filter((m) => m !== options.model);
+    if (requestedModel) customizeModel(options, 'model', requestedModel);
+    syncModelRouting(options, baseProfile(options) === 'free' ? FREE_FALLBACK_MODELS : GO_MODEL_IDS);
+    if (options.profileExplicit || options.modelExplicit || !savedProfile && Object.keys(legacyModels).length) {
+      const saved = saveProfileConfig(options);
+      if (!saved.ok) app.addLog(`! ${saved.error}`);
+    }
+    if (usesCoarena(options)) {
+      ensureCoarenaPolicy();
+      app.addLog('Coarena: Opus → Fable · available keys → OpenCode Go fallback');
     }
     if (options.verbosity) {
       const applied = applyVerbosityToAllAgents(options.verbosity);
@@ -828,30 +867,33 @@ async function runTui(mode, options) {
 
   // Current settings for the /config card. Readers (run launch, scheduler)
   // consume `options` at launch time, so live mutations apply to the next task.
-  const configSnapshot = () => ({
-    model: options.model,
-    profile: options.profile,
-    verbosity: options.verbosity,
-    fallbackModels: options.fallbackModels,
-    auto: options.auto,
-    autoFallback: options.autoFallback,
-    graphify: options.graphify,
-    parallel: options.parallel,
-    workers: options.workers,
-    sequential: options.sequential,
-    dir: options.dir,
-    session: currentSessionID ?? options.session,
-    nolimit: options.nolimit,
-    volume: soundPlayer.getVolume(),
-  });
+  const configSnapshot = () => {
+    const resolved = resolvedModelConfig(options);
+    return {
+      model: resolved.model,
+      agentModels: { ...options.agentModels },
+      effectiveAgentModels: resolved.agentModels,
+      profile: options.profile,
+      customBaseProfile: options.customProfile?.baseProfile,
+      verbosity: options.verbosity,
+      fallbackModels: options.fallbackModels,
+      auto: options.auto,
+      autoFallback: options.autoFallback,
+      graphify: options.graphify,
+      parallel: options.parallel,
+      workers: options.workers,
+      sequential: options.sequential,
+      dir: options.dir,
+      session: currentSessionID ?? options.session,
+      nolimit: options.nolimit,
+      volume: soundPlayer.getVolume(),
+    };
+  };
 
   /** Recompute options.fallbackModels from autoFallback + profile. */
   const syncFallbacks = () => {
-    if (!options.autoFallback) return;
-    const isFree = options.profile === 'free';
-    const pool = isFree ? [...FREE_FALLBACK_MODELS] : [...GO_MODEL_IDS];
-    // Exclude the currently selected primary model from the fallback pool.
-    options.fallbackModels = pool.filter((m) => m !== options.model);
+    syncModelRouting(options, baseProfile(options) === 'free' ? FREE_FALLBACK_MODELS : GO_MODEL_IDS);
+    if (usesCoarena(options)) ensureCoarenaPolicy();
   };
 
   /** Apply a sound volume (persisted + live): 0 mutes, >0 un-mutes. */
@@ -894,29 +936,16 @@ async function runTui(mode, options) {
 
   /** Cycle the selected config row's value (enter/←/→ inside the card). */
   const applyConfigChange = (key, dir = 1) => {
-    const value = cycleConfigValue(options, key, dir, { model: customModel, fallbacks: customFallbackModels });
+    const resolved = resolvedModelConfig(options);
+    const value = cycleConfigValue(options, key, dir, { model: customModel, fallbacks: customFallbackModels, agentModels: resolved.agentModels, resolved });
     if (value === null) return;
-    if (key === 'model') {
-      // The card's model is global: push it into opencode.json for the
-      // orchestrator, every subagent, and the top-level default.
-      const applied = applyModelToAllAgents(options.model);
-      let profileError = null;
-      // The free profile pins every agent, so an explicit model choice exits it.
-      const freeNote = options.profile === 'free' ? ' · free profile cleared' : '';
-      if (options.profile === 'free') options.profile = null;
-      if (applied.ok && options.profile) {
-        const profileApplied = applyProfileToAllAgents(options.profile);
-        if (!profileApplied.ok) profileError = profileApplied.error ?? 'profile apply failed';
-      }
-      if (applied.ok && !profileError) {
-        app.addLog(`config · model → ${value} · applied to all ${applied.agents} agent(s) + default${freeNote}`);
-      } else {
-        const error = applied.ok ? profileError : (applied.error ?? 'apply failed');
-        app.addLog(`! config · model → ${value} · ${truncate(error, 90)}`);
-      }
+    if (key.startsWith('agent:') || key === 'model') {
+      if (usesCoarena(options)) ensureCoarenaPolicy();
+      app.addLog(`config · ${key.startsWith('agent:') ? key.slice(6) : 'shared model'} → ${value} · Custom profile · next task`);
     } else if (key === 'profile') {
-      const applied = applyProfileToAllAgents(options.profile);
+      const applied = options.profile === 'custom' ? { ok: true, agents: 7 } : applyProfileToAllAgents(options.profile);
       if (applied.ok) {
+        syncProfileModel(options);
         app.addLog(`config · profile → ${value} · applied to ${applied.agents} agent(s) + default`);
       } else {
         app.addLog(`! config · profile → ${value} · ${truncate(applied.error ?? 'apply failed', 90)}`);
@@ -937,7 +966,21 @@ async function runTui(mode, options) {
     } else {
       app.addLog(`config · ${key} → ${value}`);
     }
+    if (options.autoFallback || key === 'profile') syncFallbacks();
+    if (key === 'model' || key.startsWith('agent:') || key === 'profile') {
+      const saved = saveProfileConfig(options);
+      if (!saved.ok) app.addLog(`! ${saved.error}`);
+    }
+    app.updateConfigInfo(configSnapshot());
+  };
+  const applyModelPickerChoice = () => {
+    const { key, model } = app.modelPickerChoice();
+    customizeModel(options, key === 'model' ? 'model' : key.slice(6), model, resolvedModelConfig(options));
+    if (usesCoarena(options)) ensureCoarenaPolicy();
     if (options.autoFallback) syncFallbacks();
+    const saved = saveProfileConfig(options);
+    app.addLog(saved.ok ? `config · ${key === 'model' ? 'all agents' : key.slice(6)} → ${model ?? 'all-agent model'} · Custom saved` : `! ${saved.error}`);
+    app.closeModelPicker();
     app.updateConfigInfo(configSnapshot());
   };
   let finish;
@@ -1046,6 +1089,7 @@ async function runTui(mode, options) {
 
   const handleParsed = (parsed) => {
     if (parsed.sessionID) {
+      app.setAgentRuntime('orchestrator', { sessionID: parsed.sessionID });
       currentSessionID = parsed.sessionID;
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
       app.setRunSession(parsed.sessionID);
@@ -1062,8 +1106,9 @@ async function runTui(mode, options) {
     }
     if (parsed.text) {
       lastText = parsed.text;
-      app.addLog(`▸ ${parsed.text}`);
     }
+    if (parsed.logEntry) app.addLog(parsed.logEntry.text, parsed.logEntry);
+    else if (parsed.text) app.addLog(parsed.text, { kind: 'message', dir: 'in' });
     if (parsed.permission) {
       const action = parsed.permission.action ?? 'permission';
       const pattern = parsed.permission.pattern ?? '';
@@ -1076,8 +1121,8 @@ async function runTui(mode, options) {
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: label });
       }
     }
-    for (const event of parsed.events ?? []) app.applyEvent(event);
-    if (parsed.diff) {
+    for (const event of parsed.events ?? []) app.applyEvent({ ...event, logRecorded: Boolean(parsed.logEntry) });
+    if (parsed.diff && !parsed.logEntry) {
       app.addLog(parsed.diff);
     }
     if (parsed.error) {
@@ -1112,7 +1157,7 @@ async function runTui(mode, options) {
     if (fallbackSwitched) {
       fallbackSwitched = false;
       try {
-        if (options.profile) applyProfileToAllAgents(options.profile);
+        if (options.profile && options.profile !== 'custom') applyProfileToAllAgents(options.profile);
         else applyModelToAllAgents(null);
       } catch {}
     }
@@ -1253,6 +1298,8 @@ async function runTui(mode, options) {
       let plannerLaunched;
       plannerHandle = null;
       plannerLaunched = launchRunWithFallback({
+        agentModels: effectiveAgentModels(options),
+        autoFallback: options.autoFallback,
         task: buildPlanningPrompt(objective, {
           maxTasks: Math.max(2, Math.min(8, concurrency * 2)),
           sequential: Boolean(options.sequential),
@@ -1266,10 +1313,16 @@ async function runTui(mode, options) {
         onEvent: (parsed) => {
           if (parsed.text) planChunks.push(parsed.text);
         },
-        onHandle: (h) => { plannerHandle = h; },
+        onHandle: (h) => {
+          plannerHandle = h;
+          app.setAgentRuntime('orchestrator', { model: h.model });
+          for (const [agent, model] of Object.entries(h.agentModels)) app.setAgentRuntime(agent, { model });
+        },
         onRetry: (nextModel, reason) => {
           if (token !== runToken || stopped) return;
-          try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          if (!usesCoarena(options) && !hasAgentModels(options)) {
+            try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          }
           app.addLog(`↻ planner retrying on ${nextModel}: ${truncate(reason, 80)}`);
         },
         onError: () => {},
@@ -1308,6 +1361,9 @@ async function runTui(mode, options) {
     manager = createWorkerManager({
       model: options.model,
       fallbackModels: options.fallbackModels ?? [],
+      coarena: usesCoarena(options),
+      agentModels: effectiveAgentModels(options),
+      autoFallback: options.autoFallback,
       dir: options.dir,
       bin: options.opencode,
       auto: options.auto,
@@ -1321,8 +1377,12 @@ async function runTui(mode, options) {
     const offBus = manager.bus.onEvent((evt) => {
       if (token !== runToken || stopped) return;
       const agent = agentOf(evt.taskId);
+      if (evt.meta?.model) app.setAgentRuntime(agent, { model: evt.meta.model });
+      if (evt.sessionId) app.setAgentRuntime(agent, { sessionID: evt.sessionId });
       const task = taskById.get(evt.taskId);
-      if (evt.kind === 'worker-started') {
+      if (evt.kind === 'log') {
+        app.recordAgentLog(agent, evt.meta.logEntry);
+      } else if (evt.kind === 'worker-started') {
         refreshPanel();
         const title = truncate(task?.title ?? evt.taskId, 60);
         app.addLog(`▶ ${agent}: ${title}`);
@@ -1332,7 +1392,7 @@ async function runTui(mode, options) {
         const record = manager.workers.get(evt.workerId);
         const summary = truncate(String(record?.output ?? '').trim() || 'done', 90);
         app.addLog(`✓ ${agent}: ${summary}`);
-        app.applyEvent({ kind: 'msg', dir: 'in', from: agent, text: record?.output ?? 'done' });
+        app.applyEvent({ kind: 'msg', dir: 'in', from: agent, text: record?.output ?? 'done', logRecorded: true });
         // msg-in flips the pillar back to "working"; settle it explicitly so
         // the ACTIVE AGENTS panel drops it when the task is finished.
         app.applyEvent({ kind: 'status', from: agent, text: 'done', state: 'done' });
@@ -1343,12 +1403,12 @@ async function runTui(mode, options) {
         app.addLog(`✗ ${agent}: ${detail}`);
         app.applyEvent({ kind: 'status', from: agent, text: `✗ ${detail}`, state: 'idle' });
       } else if (evt.kind === 'tool') {
-        app.applyEvent({ kind: 'tool', from: agent, text: evt.text });
+        app.applyEvent({ kind: 'tool', from: agent, text: evt.text, logRecorded: evt.meta?.logRecorded });
       } else if (evt.kind === 'permission') {
         app.addLog(`⚠ ${agent}: permission requested — see --auto or allow rules`);
       } else if (evt.kind === 'status') {
         // Carries an indented diff preview for edit/write tools.
-        app.addLog(`${agent}:\n${evt.text}`);
+        if (!evt.meta?.logRecorded) app.recordAgentLog(agent, { kind: 'status', text: evt.text });
       }
       // 'started'/'session'/'failure' are logged implicitly via panel updates;
       // keep the log feed focused on outcomes.
@@ -1385,7 +1445,7 @@ async function runTui(mode, options) {
     if (fallbackSwitched) {
       fallbackSwitched = false;
       try {
-        if (options.profile) applyProfileToAllAgents(options.profile);
+        if (options.profile && options.profile !== 'custom') applyProfileToAllAgents(options.profile);
         else applyModelToAllAgents(null);
       } catch {}
     }
@@ -1490,9 +1550,9 @@ async function runTui(mode, options) {
           const out = execFileSync(options.opencode ?? process.env.FACTORY_OPENCODE ?? 'opencode', ['models'], { encoding: 'utf8', timeout: 15000 });
           const allLines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
           const goLines = allLines.filter((line) => line.startsWith('opencode-go/'));
-          const lines = goLines.length > 0 ? goLines : allLines;
+          const lines = [...coarenaModels(), ...(goLines.length > 0 ? goLines : allLines)];
           app.addLog(goLines.length > 0
-            ? 'models (opencode-go catalog; run picks in order):'
+            ? 'models (Coarena keys + opencode-go catalog; run picks in order):'
             : 'models (no opencode-go entries; showing full catalog):');
           lines.slice(0, 20).forEach((l) => app.addLog(` ${l}`));
           if (lines.length > 20) app.addLog(` … +${lines.length - 20} more`);
@@ -1612,6 +1672,8 @@ async function runTui(mode, options) {
     runToken += 1;
     const token = runToken;
     const resumed = Boolean(currentSessionID);
+    app.updateConfigInfo(configSnapshot());
+    for (const agent of MODEL_AGENT_KEYS) app.setAgentRuntime(agent, { model: effectiveAgentModels(options)[agent] ?? options.model ?? undefined });
     app.startRun({
       sessionID: currentSessionID,
       resumed,
@@ -1678,6 +1740,8 @@ async function runTui(mode, options) {
     let handle;
     try {
       const launched = await launchRunWithFallback({
+        agentModels: effectiveAgentModels(options),
+        autoFallback: options.autoFallback,
         task: launchTask,
         model: options.model,
         fallbackModels: options.fallbackModels ?? [],
@@ -1706,12 +1770,16 @@ async function runTui(mode, options) {
         },
         onHandle: (h) => {
           handle = h;
+          app.setAgentRuntime('orchestrator', { model: h.model });
+          for (const [agent, model] of Object.entries(h.agentModels)) app.setAgentRuntime(agent, { model });
           activeRun = h;
           if (h?.child?.pid) app.setRunPid(h.child.pid);
         },
         onRetry: (nextModel, reason) => {
           if (token !== runToken || stopped) return;
-          try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          if (!usesCoarena(options) && !hasAgentModels(options)) {
+            try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
+          }
           app.addLog(`↻ retrying on ${nextModel}: ${truncate(reason, 80)}`);
           app.applyEvent({ kind: 'status', from: 'orchestrator', text: `retrying on ${nextModel}` });
         },
@@ -1746,7 +1814,8 @@ async function runTui(mode, options) {
     try {
       const handle = launchRun({
         task: value,
-        model: options.model,
+        model: effectiveAgentModels(options).orchestrator ?? options.model,
+        agentModels: effectiveAgentModels(options),
         fallbackModels: options.fallbackModels ?? [],
         auto: options.auto,
         dir: options.dir,
@@ -1811,6 +1880,13 @@ async function runTui(mode, options) {
       else if (text === '\x1b[D') app.cycleLogAgent(-1);
       else if (text === '\x1b[A') app.scrollLog(-1);
       else if (text === '\x1b[B') app.scrollLog(1);
+      else if (text === '\x1b[5~') app.scrollLog(-Math.max(1, app.height - 10));
+      else if (text === '\x1b[6~') app.scrollLog(Math.max(1, app.height - 10));
+      else if (text === 'f' || text === 'F') app.cycleLogFilter();
+      else if (text === 'g' || text === '\x1b[H' || text === '\x1b[1~') app.jumpLog(false);
+      else if (text === 'G' || text === '\x1b[F' || text === '\x1b[4~') app.jumpLog(true);
+      else if (text === ' ') app.toggleLogFollow();
+      else if (text === '0') app.openLog('orchestrator');
       else if (text.length === 1 && text >= '1' && text <= '6') {
         app.openLog(AGENT_ORDER[Number(text) - 1]);
       }
@@ -1819,9 +1895,21 @@ async function runTui(mode, options) {
     }
     // Config overlay: rows, q/Esc close, other keys are swallowed.
     if (app.configView.open) {
+      if (app.modelPicker.open) {
+        if (text === '\x1b' || text === 'q' || text === 'Q') app.closeModelPicker();
+        else if (text === '\x1b[A') app.moveModelPicker(-1);
+        else if (text === '\x1b[B') app.moveModelPicker(1);
+        else if (text === '\r' || text === '\n') applyModelPickerChoice();
+        return;
+      }
       if (text === '\x1b' || text === 'q' || text === 'Q') app.closeConfig();
       else if (text === '\x1b[A') app.moveConfigSelection(-1);
       else if (text === '\x1b[B') app.moveConfigSelection(1);
+      else if ((text === '\r' || text === '\n') && (app.configView.selected === 'model' || app.configView.selected.startsWith('agent:'))) {
+        const resolved = resolvedModelConfig(options);
+        const key = app.configView.selected;
+        app.openModelPicker(key, configModelChoices(options, key, { model: customModel }), key === 'model' ? resolved.model : resolved.agentModels[key.slice(6)]);
+      }
       else if (text === '\r' || text === '\n' || text === '\x1b[C') applyConfigChange(app.configView.selected, 1);
       else if (text === '\x1b[D') applyConfigChange(app.configView.selected, -1);
       return;

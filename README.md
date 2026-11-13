@@ -11,7 +11,7 @@ all subagent traffic live.
 ## Requirements
 
 - Node.js 22 or newer
-- The OpenCode CLI, authenticated with OpenCode Go for the default models
+- The OpenCode CLI, with Coarena keys or OpenCode Go authentication (or the free profile)
 - A terminal of at least **60×24**
 
 There are no npm dependencies and nothing to install.
@@ -93,6 +93,24 @@ Composer commands:
 `/config` opens an editable card for the model, profile, verbosity, fallbacks,
 auto-approve, parallelism, nolimit, graphify and sound volume settings.
 
+The seven agent rows choose an independent **base model** for the orchestrator,
+explorer, architect, developer, reviewer, security, and tester. Use ↑/↓ to
+select a named agent row, then press Enter to open its model picker. The picker
+lists Coarena Opus/Fable with key 1 and key 2 separately. ↑/↓ selects a model,
+Enter applies it to that agent, and Esc cancels. ←/→ still cycles models.
+Editing a model automatically
+creates **Custom**, retaining the preset's effort level and every untouched
+agent's model. The **all agents** row sets all seven agents together.
+
+The profile row switches between presets and your saved Custom profile.
+Selecting a preset keeps Custom available; editing a preset updates the
+Custom slot. The active selection and complete Custom lineup persist in
+`~/.config/thefactory/config.json` (or `$XDG_CONFIG_HOME/thefactory/config.json`).
+Older per-agent settings are imported automatically. Changes apply to the next
+task, including parallel workers, and temporary fallbacks never rewrite Custom.
+Changing the profile immediately refreshes the displayed models and variants.
+`--profile custom` selects the saved Custom profile explicitly.
+
 ## Sounds
 
 `pop.mp3` plays when an agent is called (orchestrator → subagent, worker
@@ -107,6 +125,39 @@ Flags: `--volume <0-100>`, `--mute` / `--no-sound`; env: `FACTORY_VOLUME`,
 output volume is left untouched. Snapshot frames stay silent.
 
 ## Model profiles
+
+With Coarena keys configured and the default profile, task mode starts on Claude Opus 5.5 and retries
+in this order on quota/rate-limit errors: Opus key 1 → Opus key 2 → Fable 5.2
+key 1 → Fable key 2 → the existing OpenCode Go pool. Only populated, distinct
+keys are tried. The free profile keeps using its free-only pool.
+Low/Medium/High keep their OpenCode Go lineup even when Coarena keys are
+available. To use Coarena for just one agent, select that agent in `/config`.
+Individual retries change only the running agent's model.
+
+Fill in `.env` beside `package.json` (see `.env.example`):
+
+```dotenv
+COARENA_API_KEY_1=your_first_key
+COARENA_API_KEY_2=your_second_key
+```
+
+Then run `node bin/theFactory.js` normally. The CLI loads these two variables
+automatically; exported values take precedence. `.env` is ignored by Git.
+The `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` instructions on Coarena's site
+are for Claude Code and are not needed here.
+
+On first use, theFactory adds the two Coarena aliases to the global OpenCode
+provider allowlist. Credentials and agent model overrides are supplied to each
+private OpenCode process, including parallel workers, without saving keys or
+replacing the global agent lineup. Each new task probes Coarena again.
+
+`--model coarena-1/claude-fable-5-2` selects Fable first. `--no-auto-fallback`
+disables automatic retries; `--fallback-models` supplies a custom list instead.
+Authentication/permission errors stop the run rather than triggering retries.
+
+Coarena documents its model IDs, Anthropic endpoint, and account limits in
+[its API docs](https://coarena.ai/docs). Two keys on the same account may share
+limits; they do not guarantee twice the quota.
 
 - `low`, `medium`, `high` apply model variants to every agent.
 - `free` pins every agent to an `opencode/*-free` model, so no subscription is
@@ -141,8 +192,19 @@ agents talk, in order to reduce token usage. It applies to every agent.
 
 - `←` / `→` switch agents
 - `↑` / `↓` scroll
+- Page Up / Page Down scroll a page; `g` / Home jumps to the oldest entry
+- `G` / End returns to the latest entry; Space pauses or resumes following
+- `f` cycles All / Messages / Tools / Errors
+- `0` opens the orchestrator
 - `1`–`6` jump to a pillar
 - Esc or `q` closes
+
+The viewer preserves Markdown, code indentation, and full multiline responses.
+Code, JSON, shell commands, and diffs have syntax colors. Tool entries show
+input/output, status and duration when OpenCode supplies them. The header
+shows the agent's model and session. Each agent retains up to 500 entries;
+individual tool content is capped at 32,000 characters with a visible notice.
+Scrolling back holds your place while new events arrive.
 
 ## Graphify
 

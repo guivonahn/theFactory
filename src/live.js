@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveAgent } from './agents.js';
 import { toolDetail } from './run.js';
+import { toolLogEntry } from './logFormat.js';
 
 export const DEFAULT_DB_PATH = path.join(os.homedir(), '.local/share/opencode/opencode.db');
 
@@ -203,13 +204,17 @@ function tail(value, max = 160) {
 export function convertRow(row, meta) {
   const data = parseData(row.data);
   const events = [];
+  const rawText = textParts(data).join('\n\n');
+  const model = typeof data.model === 'string' ? data.model : data.model?.providerID && data.model?.modelID ? `${data.model.providerID}/${data.model.modelID}` : undefined;
+  const logMeta = { id: row.id, timestamp: Number.isFinite(row.time_created) ? row.time_created : undefined, sessionID: row.session_id, model };
   if (row.type === 'user') {
     const text = tail(textParts(data).join(' '), 160);
-    if (!text) return events;
+    if (!rawText.trim()) return events;
+    const logEntry = { ...logMeta, kind: 'msg', dir: 'out', text: rawText };
     if (meta.isRoot) {
-      events.push({ kind: 'status', from: 'orchestrator', text: `task: ${tail(text, 90)}` });
+      events.push({ kind: 'status', from: 'orchestrator', text: `task: ${tail(text, 90)}`, logEntry });
     } else {
-      events.push({ kind: 'msg', from: 'orchestrator', to: meta.agentKey, dir: 'out', text });
+      events.push({ kind: 'msg', from: 'orchestrator', to: meta.agentKey, dir: 'out', text: text || rawText, logEntry });
     }
     return events;
   }
@@ -219,27 +224,27 @@ export function convertRow(row, meta) {
   const content = Array.isArray(data.content) ? data.content : [];
   if (meta.isRoot) {
     const text = tail(textParts(data).join(' '), 120);
-    if (text) events.push({ kind: 'status', from: 'orchestrator', text: `orchestrator: ${text}` });
+    if (rawText.trim()) events.push({ kind: 'status', from: 'orchestrator', text: `orchestrator: ${text || 'response'}`, logEntry: { ...logMeta, kind: 'message', dir: 'in', text: rawText } });
     const named = String(data.agent ?? '').toLowerCase();
     if (named && named !== 'orchestrator' && resolveAgent(named).key !== 'other') {
       events.push({ kind: 'status', from: named, text: 'done' });
     }
-    return events;
   }
 
   for (const part of content) {
-    if (part?.type !== 'tool') continue;
+    if (part?.type !== 'tool' && part?.type !== 'tool_use') continue;
     const state = part.state?.status ? ` (${part.state.status})` : '';
     const detail = toolDetail(part.state?.input ?? part.input ?? {});
     events.push({
       kind: 'tool',
-      from: meta.agentKey,
+      from: meta.isRoot ? 'orchestrator' : meta.agentKey,
       text: `${part.name ?? 'tool'}${detail ? `: ${detail}` : ''}${state}`,
+      logEntry: toolLogEntry(part, logMeta),
     });
   }
 
   const text = tail(textParts(data).join(' '), 160);
-  if (text) events.push({ kind: 'msg', from: meta.agentKey, dir: 'in', text });
+  if (!meta.isRoot && rawText.trim()) events.push({ kind: 'msg', from: meta.agentKey, dir: 'in', text: text || rawText, logEntry: { ...logMeta, kind: 'message', dir: 'in', text: rawText } });
 
   if (data.finish === 'stop' || data.finish === 'completed') {
     events.push({ kind: 'status', from: meta.agentKey, text: 'done' });
