@@ -17,6 +17,15 @@ test('buildPlanningPrompt carries objective, task bound and mode', () => {
   assert.ok(sequential.includes('strictly one after another'));
 });
 
+test('investigation plans allow one reader and do not require optional files or a duplicate summary', () => {
+  const prompt = buildPlanningPrompt('how does this project work?');
+  assert.match(prompt, /one task is valid/);
+  assert.match(prompt, /Prefer one explorer/);
+  assert.match(prompt, /do not gate all research on a preliminary map/);
+  assert.match(prompt, /Finding an optional file absent is a valid observation/);
+  assert.match(prompt, /Do not add a summary-only task/);
+});
+
 test('extractPlanJson strips fences, prose, and survives braces in strings', () => {
   const fenced = 'Sure!\n```json\n{"tasks":[{"id":"t1","text":"literal } brace"}]}\n```\ndone';
   assert.equal(extractPlanJson(fenced), '{"tasks":[{"id":"t1","text":"literal } brace"}]}');
@@ -40,6 +49,7 @@ test('parsePlan normalizes to scheduler-ready tasks (validateTasks)', () => {
 });
 
 test('parsePlan rejects unusable output at parse and shape level', () => {
+  assert.throws(() => parsePlan('{"tasks":[]}'), /no tasks/);
   assert.throws(() => parsePlan('I will not follow the format.'), /no JSON object/);
   assert.throws(() => parsePlan('{"tasks":[{},{}]}'), /missing id/);
   assert.throws(() => parsePlan('{"tasks":[_],}'), /invalid/);

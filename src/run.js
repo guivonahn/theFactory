@@ -10,6 +10,7 @@ import { imagesFromPart } from './media.js';
 import { coarenaModels, coarenaRunEnv, isCoarenaModel, usesCoarena } from './coarena.js';
 import { agentModelsRunEnv, hasAgentModels, MODEL_AGENT_KEYS } from './agentModels.js';
 import { toolLogEntry } from './logFormat.js';
+import { agentPromptsRunEnv } from './agentPrompts.js';
 
 const STDERR_TAIL = 2000;
 
@@ -181,6 +182,9 @@ export function parseRunLine(line) {
       return result;
     }
     const input = part.state?.input ?? part.input ?? part.state?.metadata ?? {};
+    if (tool === 'todowrite' && Array.isArray(input.todos)) {
+      result.tasks = input.todos.filter((todo) => todo && typeof todo === 'object' && typeof todo.content === 'string' && ['pending', 'in_progress', 'completed', 'cancelled'].includes(todo.status));
+    }
     const detail = toolDetail(input);
     const rawAgent =
       input && typeof input === 'object'
@@ -279,6 +283,7 @@ export function launchRun(options = {}) {
   const allAgents = !hasAgentModels(options) && (isCoarenaModel(options.model) || options.coarena && options.fallbackAttempt);
   if (usesCoarena(options)) env = coarenaRunEnv(env, options.model, { allAgents });
   if (hasAgentModels(options)) env = agentModelsRunEnv(env, options.model, options.agentModels, options.fallbackAttempt, options.agent ?? 'orchestrator');
+  env = agentPromptsRunEnv(env, { registry: options.registry, skillText: options.skillText ?? options.task, reportOnly: options.reportOnly });
   const child = spawn(command, args, {
     cwd: options.dir || process.cwd(),
     env,

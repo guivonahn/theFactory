@@ -16,22 +16,22 @@ import { LiveSource, listRootSessions } from './live.js';
 import { startGoUsagePoller } from './goUsage.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
 import { launchRun, launchRunWithFallback } from './run.js';
-import { runTasks } from './scheduler.js';
-import { createWorkerManager } from './worker.js';
-import { detectConflicts } from './integrate.js';
+import { runTasks, scopesConflict } from './scheduler.js';
+import { createWorkerManager, completedWorker } from './worker.js';
 import {
   buildPlanningPrompt,
   parsePlan,
   fallbackPlan,
 } from './plan.js';
 import { saveParallelState } from './parallelState.js';
+import { buildOverviewData, renderOverview, synthesizeOverview, unfinishedRecap } from './completion.js';
 import {
   clearPersistedSession,
   loadPersistedSession,
   savePersistedSession,
 } from './sessionState.js';
 import { ensureNolimit, nolimitCommand, applyModelToAllAgents } from './nolimit.js';
-import { loadSkills, createSkillRegistry } from './skills.js';
+import { loadSkills, createSkillRegistry, skillsPrompt } from './skills.js';
 import { baseProfile, PROFILE_ORDER, applyProfileToAllAgents, FREE_FALLBACK_MODELS } from './profiles.js';
 import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
 import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
@@ -105,6 +105,10 @@ Flags:
   --no-follow            stop after backfill
   --snapshot [n]         render n frames as plain text (default 1)
   --demo, --live         choose the event source for --snapshot
+  --worker-preview      audition three animated factory creature designs
+  --factory-preview     preview the factory, logo and parallel crew locally
+  --reduced-motion      keep creatures and decorative motion still (also
+                         FACTORY_REDUCED_MOTION=1 or REDUCE_MOTION=1)
   --version              print the installed version
   -h, --help             show this help
 
@@ -117,6 +121,7 @@ Task-mode composer commands (typed instead of a task):
   /volume [0-100|mute|on|off|+n|-n]
                          show/set sound volume (persisted; plays a pop preview)
   /log                   open the log viewer (works even while a task is running)
+  /overview              reopen the latest completed/partial run overview
 
 Keys in task mode: type a task, Enter submits, Backspace edits, Esc aborts a
 running task, Ctrl-C always quits, q quits only when the prompt is empty.
@@ -262,6 +267,9 @@ export function parseArgs(argv) {
     auto: false,
     graphify: true,
     mouse: false,
+    workerPreview: false,
+    factoryPreview: false,
+    reducedMotion: undefined,
     volume: null,
     mute: false,
     autoFallback: true,
@@ -289,6 +297,9 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--demo') options.mode = 'demo';
+    else if (arg === '--worker-preview') { options.workerPreview = true; options.mode = 'demo'; }
+    else if (arg === '--factory-preview') { options.factoryPreview = true; options.mode = 'demo'; }
+    else if (arg === '--reduced-motion') options.reducedMotion = true;
     else if (arg === '--live') options.mode = 'live';
     else if (arg === '--task') options.mode = 'task';
     else if (arg === '--picker') options.mode = 'picker';
@@ -513,8 +524,9 @@ function applySessionCounts(app, source) {
   for (const [key, count] of source.agentCounts()) app.setSessionCount(key, count);
 }
 
-function buildDemoFrames(frames, width, height) {
-  const app = new App({ width, height, color: false, mode: 'demo' });
+function buildDemoFrames(frames, width, height, options = {}) {
+  const app = new App({ width, height, color: false, mode: 'demo', workerPreview: options.workerPreview, factoryPreview: options.factoryPreview, reducedMotion: options.reducedMotion });
+  if (options.workerPreview || options.factoryPreview) return Array.from({ length: frames }, () => { const frame = app.snapshot(); app.advance(150); return frame; });
   const timeline = demoEvents();
   const total = (timeline[timeline.length - 1]?.at ?? 0) + 2500;
   const output = [];
@@ -534,8 +546,8 @@ function buildDemoFrames(frames, width, height) {
   return output;
 }
 
-function buildLiveFrames(source, frames, width, height) {
-  const app = new App({ width, height, color: false, mode: 'live' });
+function buildLiveFrames(source, frames, width, height, options = {}) {
+  const app = new App({ width, height, color: false, mode: 'live', reducedMotion: options.reducedMotion });
   applySessionCounts(app, source);
   const events = source.loadBackfill();
   const output = [];
@@ -569,12 +581,12 @@ function runSnapshot(mode, options, frames) {
     const source = new LiveSource({ session: options.session, dir: options.dir, limit: options.limit });
     try {
       source.open();
-      output = buildLiveFrames(source, count, width, height);
+      output = buildLiveFrames(source, count, width, height, options);
     } finally {
       source.close();
     }
   } else {
-    output = buildDemoFrames(count, width, height);
+    output = buildDemoFrames(count, width, height, options);
   }
 
   process.stdout.write(`${output.join('\n\f\n')}\n`);
@@ -607,6 +619,9 @@ async function runTui(mode, options) {
     color: !('NO_COLOR' in process.env),
     mode,
     inputMode: mode === 'task',
+    workerPreview: options.workerPreview,
+    factoryPreview: options.factoryPreview,
+    reducedMotion: options.reducedMotion,
   });
   // Sound cues (pop on agent call, error on failure). Only the interactive
   // TUI wires this hook, so snapshot/demo-frame builds stay silent.
@@ -618,8 +633,8 @@ async function runTui(mode, options) {
   app.onSound = (name) => {
     try { soundPlayer.play(name); } catch {}
   };
-  const goUsagePoller = startGoUsagePoller(app);
-  const skillRegistry = createSkillRegistry(loadSkills());
+  const goUsagePoller = options.workerPreview || options.factoryPreview ? { stop() {} } : startGoUsagePoller(app);
+  const skillRegistry = createSkillRegistry(loadSkills(undefined, { projectDir: options.dir || process.cwd() }));
 
   // CLI profile/verbosity flags mutate the global OpenCode config before the
   // first task, so the next `opencode run` picks them up. Failures are logged
@@ -660,7 +675,6 @@ async function runTui(mode, options) {
   let stopped = false;
   let restored = false;
   let screenEntered = false;
-  let small = false;
   let fatal = null;
   let activeRun = null;
   let preparingRun = false;
@@ -692,9 +706,11 @@ async function runTui(mode, options) {
   const seenForms = new Set();
   const seenImages = new Set();
   let lastText = '';
+  const responseParts = new Map();
+  let responseSequence = 0;
   let runToken = 0;
   const lineInput = mode === 'task' ? new LineInput(options.task ?? '') : null;
-  if (lineInput) app.setInputValue(lineInput.value);
+  if (lineInput) app.setInputValue(lineInput.value, lineInput.cursor);
   // Persistent session: --session wins, --new/--fresh ignores the file,
   // otherwise resume the persisted id when its dir matches.
   let currentSessionID = null;
@@ -1105,8 +1121,10 @@ async function runTui(mode, options) {
       app.openImage(image);
     }
     if (parsed.text) {
-      lastText = parsed.text;
+      responseParts.set(parsed.logEntry?.id || `part-${responseSequence++}`, parsed.text);
+      lastText = [...responseParts.values()].join('\n\n').slice(-96000);
     }
+    if (parsed.tasks) app.setPromptTasks(parsed.tasks);
     if (parsed.logEntry) app.addLog(parsed.logEntry.text, parsed.logEntry);
     else if (parsed.text) app.addLog(parsed.text, { kind: 'message', dir: 'in' });
     if (parsed.permission) {
@@ -1151,6 +1169,11 @@ async function runTui(mode, options) {
     }
   };
 
+  const showRunOverview = () => app.setCompletionOverview(renderOverview(buildOverviewData({
+    objective: app.run.objective, state: app.run.state, tasks: app.promptTasks,
+    detail: app.run.detail, report: lastText,
+  })));
+
   const finishTask = (result) => {
     activeRun = null;
     stopFormPolling();
@@ -1173,7 +1196,7 @@ async function runTui(mode, options) {
     }
     const elapsed = Math.max(
       0,
-      Math.floor((app.run.startedAt ? app.now - app.run.startedAt : 0) / 1000),
+      Math.floor((app.now - app.run.startedAt) / 1000),
     );
     if (result.error) {
       const rawMessage = String(result.error?.message ?? result.error);
@@ -1199,6 +1222,13 @@ async function runTui(mode, options) {
       app.addLog(`reason: ${truncate(message, 108)}`);
       app.addLog(`! ${truncate(message, 110)}`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
+    } else if (result.code === 0 && app.promptTasks.some((task) => task.state !== 'completed')) {
+      const count = app.promptTasks.filter((task) => task.state !== 'completed').length;
+      app.finishRun('error', `${count} planned step(s) remain unfinished`);
+      app.addLog(`! ${count} planned step(s) remain unfinished; see the overview`);
+    } else if (result.code === 0 && unfinishedRecap(lastText)) {
+      app.finishRun('error', truncate(unfinishedRecap(lastText), 120));
+      app.addLog('! The orchestrator reported unfinished work; see the overview.');
     } else if (result.code === 0) {
       const detail = lastText.trim();
       app.finishRun('done', detail);
@@ -1231,6 +1261,7 @@ async function runTui(mode, options) {
       app.addLog(`! ${truncate(message, 110)}`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
     }
+    showRunOverview();
     abortRequested = false;
     app.setInputValue(lineInput?.value ?? '');
   };
@@ -1251,10 +1282,11 @@ async function runTui(mode, options) {
     abortRequested = true;
     app.addLog('■ abort requested');
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'aborting opencode run…' });
-    try { activeRun.kill('SIGTERM'); } catch (e) { app.addLog(`! kill: ${e?.message}`); }
+    const runToAbort = activeRun;
+    try { runToAbort.kill('SIGTERM'); } catch (e) { app.addLog(`! kill: ${e?.message}`); }
     if (killTimer) clearTimeout(killTimer);
     killTimer = setTimeout(() => {
-      if (activeRun) { try { activeRun.kill('SIGKILL'); } catch {} }
+      if (activeRun === runToAbort) { try { runToAbort.kill('SIGKILL'); } catch {} }
     }, 2500);
   };
 
@@ -1267,6 +1299,7 @@ async function runTui(mode, options) {
   const launchParallelRun = async (objective, token, graphifyGuide = null) => {
     const concurrency = options.sequential ? 1 : (options.workers ?? 3);
     const runId = `run_${Date.now()}`;
+    const controller = new AbortController();
 
     // --- Phase 1: plan (fresh session so the plan is unpolluted).
     app.applyEvent({
@@ -1279,17 +1312,20 @@ async function runTui(mode, options) {
     let plannerWarn = null;
     let plannerHandle = null;
     let manager = null;
+    let overviewHandle = null;
     // Unified abort: while the planner runs, kill its child; once workers
     // exist, cancel running ones. killTimer's late SIGKILL hits handles.
     activeRun = {
       kill: (signal) => {
+        controller.abort();
         try { plannerHandle?.kill(signal); } catch {}
+        try { overviewHandle?.kill(signal); } catch {}
         if (!manager) return;
         for (const [workerId, record] of manager.workers) {
-          if (record.state !== 'running' || !record.handle) continue;
+          if (!['running', 'queued', 'cancelled'].includes(record.state) || !record.handle) continue;
           try {
             if (signal === 'SIGKILL') record.handle.kill('SIGKILL');
-            else manager.cancel(workerId);
+            else if (record.state !== 'cancelled') manager.cancel(workerId);
           } catch {}
         }
       },
@@ -1350,6 +1386,14 @@ async function runTui(mode, options) {
       });
     }
     if (stopped || token !== runToken) return;
+    if (controller.signal.aborted) {
+      activeRun = null;
+      if (killTimer) { clearTimeout(killTimer); killTimer = null; }
+      app.finishRun('aborted');
+      showRunOverview();
+      abortRequested = false;
+      return;
+    }
     app.addLog(`plan: ${plan.length} task(s) — ${plan.map((t) => `${t.id}:${t.agent}`).join(' ')}`);
     app.applyEvent({
       kind: 'status',
@@ -1371,7 +1415,10 @@ async function runTui(mode, options) {
     });
     const taskById = new Map(plan.map((t) => [t.id, t]));
     const agentOf = (taskId) => taskById.get(taskId)?.agent ?? 'other';
+    let taskSnapshot = plan.map((task) => ({ id: task.id, state: task.deps.length ? 'pending' : 'ready', attempts: 0 }));
     const refreshPanel = () => app.setParallelWorkers(manager.list());
+    app.setParallelTasks(taskSnapshot, concurrency);
+    app.runPhase = 'working';
     refreshPanel();
 
     const offBus = manager.bus.onEvent((evt) => {
@@ -1412,19 +1459,29 @@ async function runTui(mode, options) {
       }
       // 'started'/'session'/'failure' are logged implicitly via panel updates;
       // keep the log feed focused on outcomes.
+      refreshPanel();
     });
 
     let planFailed = false;
+    let schedulerError = '';
     try {
       await runTasks({
         tasks: plan,
         concurrency,
         sequential: Boolean(options.sequential),
-        executor: (task) => {
+        signal: controller.signal,
+        onEvent: (event, snapshot) => {
+          taskSnapshot = snapshot;
+          if (token !== runToken || stopped) return;
+          app.setParallelTasks(snapshot, concurrency);
+          if (event.kind === 'blocked') app.addLog(`⊘ ${event.taskId}: ${event.error}`);
+        },
+        executor: (task, { dependencies }) => {
           const { done } = manager.start({
             runId,
             task,
             objective,
+            artifacts: Object.entries(dependencies).map(([id, result]) => `${id} (${agentOf(id)}) — runtime state: ${result?.state ?? 'unknown'}${result?.acceptanceReview?.decision === 'completed' ? `; acceptance reviewed: ${result.acceptanceReview.reason}` : ''}:\n${String(result?.output ?? '').slice(0, 12000)}`),
             registry: skillRegistry,
             model: options.model,
             dir: options.dir,
@@ -1432,12 +1489,13 @@ async function runTui(mode, options) {
             auto: options.auto,
           });
           refreshPanel();
-          return done;
+          return done.then(completedWorker);
         },
       });
     } catch (error) {
       planFailed = true;
       const message = truncate(error?.message ?? String(error), 110);
+      schedulerError = message;
       app.addLog(`! scheduler failure: ${message}`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ scheduler failure: ${truncate(message, 70)}` });
     }
@@ -1450,50 +1508,72 @@ async function runTui(mode, options) {
       } catch {}
     }
 
-    // --- Integration report: manifest conflicts from the plan (Phase 5 v1).
-    let conflictsNote = null;
-    try {
-      const manifests = plan.map((task) => ({ taskId: task.id, files: task.files ?? [] }));
-      const { conflicts } = detectConflicts(manifests);
-      if (conflicts.length) {
-        conflictsNote = `${conflicts.length} file conflict(s): ${conflicts.slice(0, 3).map((c) => `${c.file}(${c.taskIds.join(',')})`).join('; ')}`;
-        app.addLog(`⚠ integration: ${conflictsNote} — review before merging`);
-      }
-    } catch {}
-    // Persist for /resume (Phase 6 snapshot) into the run workspace.
-    try {
+    // Workers use the same checkout. Scope locks serialize overlaps; this is
+    // execution in place, not a worktree merge or an integration verification.
+    const conflictsNote = null;
+    if (plan.some((task, index) => plan.slice(index + 1).some((other) => scopesConflict(task, other)))) {
+      app.addLog('shared checkout: overlapping read/write scopes were serialized');
+    }
+    // Checkpoint execution before recap, then save the final overview below.
+    const persistParallel = (overview = null, synthesized = false) => { try {
       saveParallelState(options.dir || process.cwd(), {
         runId,
         objective,
         sequential: Boolean(options.sequential),
-        tasks: plan,
+        tasks: plan.map((task) => ({ ...task, ...taskSnapshot.find((item) => item.id === task.id) })),
         workers: manager.list(),
         counts: manager.counts(),
+        events: manager.bus.list(),
         plannerFallback: plannerWarn ? 'true' : null,
         conflicts: conflictsNote,
+        overview,
+        overviewSynthesized: synthesized,
       });
-    } catch {}
-
-    activeRun = null;
-    stopFormPolling();
-    closeQuestionAtRunEnd();
+    } catch {} };
+    persistParallel();
     const counts = manager.counts();
     const doneCount = counts.completed;
     const badCount = counts.failed + counts.cancelled;
-    const lastResult = [...manager.workers.values()].reverse().find((r) => r.output)?.output ?? '';
-    if (planFailed || (doneCount === 0 && badCount > 0)) {
-      const message = `parallel run: ${doneCount} completed, ${badCount} failed/cancelled`;
+    const blockedCount = taskSnapshot.filter((task) => task.state === 'blocked').length;
+    const outcome = controller.signal.aborted ? 'aborted' : planFailed || badCount > 0 || blockedCount > 0 ? 'error' : 'done';
+    const data = buildOverviewData({
+      objective, state: outcome, tasks: plan.map((task) => ({ ...task, ...taskSnapshot.find((item) => item.id === task.id) })),
+      workers: [...manager.workers.values()], detail: [schedulerError, plannerWarn && `Planner fallback: ${plannerWarn}`].filter(Boolean).join('\n'),
+    });
+    let overview = { text: renderOverview(data), synthesized: false };
+    if (!controller.signal.aborted && !stopped && token === runToken) {
+      app.runPhase = 'recap';
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'writing overview: completed work, unfinished items and verification' });
+      overview = await synthesizeOverview(data, {
+        signal: controller.signal, model: options.model, agentModels: effectiveAgentModels(options),
+        fallbackModels: options.fallbackModels ?? [], autoFallback: options.autoFallback,
+        coarena: usesCoarena(options), dir: options.dir, bin: options.opencode,
+        onHandle: (handle) => { overviewHandle = handle; app.setAgentRuntime('orchestrator', { model: handle.model }); },
+      });
+      overviewHandle = null;
+    }
+    if (stopped || token !== runToken) return;
+    activeRun = null;
+    if (killTimer) { clearTimeout(killTimer); killTimer = null; }
+    stopFormPolling();
+    closeQuestionAtRunEnd();
+    if (controller.signal.aborted) {
+      app.finishRun('aborted');
+      app.addLog('■ parallel run aborted; queued tasks were not launched');
+    } else if (planFailed || badCount > 0 || blockedCount > 0) {
+      const message = `parallel run: ${doneCount} completed, ${badCount} failed/cancelled, ${blockedCount} blocked`;
       app.finishRun('error', message);
-      app.addLog(`! ${message}`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ ${message}` });
+      for (const record of manager.workers.values()) if (record.state === 'failed') {
+        app.addLog(`${record.taskId} (${record.role}): ${record.error || 'failed; see worker log'}`, { kind: 'error' });
+      }
     } else {
-      const detail = truncate(lastResult.trim() || (plannerWarn ? `planner fallback · ${plannerWarn}` : ''), 70);
       app.finishRun(
         'done',
         `${plan.length} task(s) · ${doneCount} worker${doneCount === 1 ? '' : 's'}${conflictsNote ? ` · ⚠ ${truncate(conflictsNote, 40)}` : ''}`,
       );
       app.addLog(
-        `✓ complete · ${plan.length} task(s) · ${doneCount} succeeded${detail ? ` · last: ${detail}` : ''}`,
+        `✓ complete · ${plan.length} task(s) · ${doneCount} succeeded · overview ready`,
       );
       app.applyEvent({
         kind: 'status',
@@ -1501,6 +1581,8 @@ async function runTui(mode, options) {
         text: `✓ ${plan.length} task(s) complete in ${counts.completed}/${counts.total} workers`,
       });
     }
+    persistParallel(overview.text, overview.synthesized);
+    app.setCompletionOverview(overview.text);
     abortRequested = false;
     app.setInputValue(lineInput?.value ?? '');
   };
@@ -1641,6 +1723,10 @@ async function runTui(mode, options) {
         app.openLog('orchestrator');
         return;
       }
+      if (command === '/overview') {
+        if (!app.openOverview()) app.addLog('No completed run overview yet.');
+        return;
+      }
       app.addLog(`! unknown command: ${command} (try /new, /sessions, /resume, /fallback, /models, /volume, /steer, /config, /log)`);
       return;
     }
@@ -1666,6 +1752,7 @@ async function runTui(mode, options) {
     source?.close();
     source = null;
     lastText = '';
+    responseParts.clear();
     abortRequested = false;
     hadPermissionFailure = false;
     permissionFailureMessage = '';
@@ -1675,6 +1762,7 @@ async function runTui(mode, options) {
     app.updateConfigInfo(configSnapshot());
     for (const agent of MODEL_AGENT_KEYS) app.setAgentRuntime(agent, { model: effectiveAgentModels(options)[agent] ?? options.model ?? undefined });
     app.startRun({
+      objective: task,
       sessionID: currentSessionID,
       resumed,
       parallel: options.parallel || options.sequential
@@ -1706,17 +1794,18 @@ async function runTui(mode, options) {
         closeQuestionAtRunEnd();
         app.finishRun('error', nolimit.error);
         app.addLog(`! ${truncate(nolimit.error, 110)}`);
+        showRunOverview();
         return;
       }
     }
-    let launchTask = task;
+    let launchTask = `${task}\n${skillsPrompt(skillRegistry)}`;
     let graphifyGuide = null;
     if (options.graphify) {
       const dir = options.dir || process.cwd();
       const graph = ensureGraphify(dir);
       if (graph.ok) {
         app.addLog('graphify: graph ready');
-        launchTask = withGraphifyPrompt(task, dir);
+        launchTask = withGraphifyPrompt(launchTask, dir);
         graphifyGuide = graphifyPrompt(dir);
       } else {
         const error = truncate(graph.error ?? 'graph unavailable', 90);
@@ -1728,6 +1817,7 @@ async function runTui(mode, options) {
     if (abortRequested) {
       app.finishRun('aborted');
       app.addLog('■ aborted during preparation');
+      showRunOverview();
       return;
     }
 
@@ -1743,6 +1833,8 @@ async function runTui(mode, options) {
         agentModels: effectiveAgentModels(options),
         autoFallback: options.autoFallback,
         task: launchTask,
+        registry: skillRegistry,
+        skillText: task,
         model: options.model,
         fallbackModels: options.fallbackModels ?? [],
         auto: options.auto,
@@ -1776,6 +1868,7 @@ async function runTui(mode, options) {
           if (h?.child?.pid) app.setRunPid(h.child.pid);
         },
         onRetry: (nextModel, reason) => {
+          responseParts.clear(); lastText = '';
           if (token !== runToken || stopped) return;
           if (!usesCoarena(options) && !hasAgentModels(options)) {
             try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
@@ -1795,6 +1888,7 @@ async function runTui(mode, options) {
       closeQuestionAtRunEnd();
       app.finishRun('error', message);
       app.addLog(`! ${truncate(message, 110)}`);
+      showRunOverview();
       return;
     }
     if (!handle) {
@@ -1842,6 +1936,8 @@ async function runTui(mode, options) {
 
   const onKey = (buffer) => {
     const raw = buffer.toString('utf8');
+    if (raw.includes('\u0003')) { stop(0); return; }
+    if (app.tooSmall) return;
     // SGR mouse reporting: left-click on an agent's "msg: n" line opens its log.
     const mousePattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
     let mouseOnly = false;
@@ -1920,10 +2016,12 @@ async function runTui(mode, options) {
     if (mode === 'task') {
       // `/log` opens the log viewer even while a task is running. Bare `l` is
       // no longer a shortcut here, so typing a task that starts with L works.
-      if ((text === '\r' || text === '\n') && lineInput.value.trim() === '/log') {
+      if ((text === '\r' || text === '\n') && ['/log', '/overview'].includes(lineInput.value.trim())) {
+        const overview = lineInput.value.trim() === '/overview';
         lineInput.reset();
         app.setInputValue('');
-        app.openLog('orchestrator');
+        if (overview) { if (!app.openOverview()) app.addLog('No completed run overview yet.'); }
+        else app.openLog('orchestrator');
         return;
       }
       // `/steer` always steers, even mid-run.
@@ -1970,11 +2068,15 @@ async function runTui(mode, options) {
         if (action.type === 'abort') abortTask();
         else if (action.type === 'submit') startTask(action.value);
       }
-      app.setInputValue(lineInput.value);
+      app.setInputValue(lineInput.value, lineInput.cursor);
       return;
     }
     if (text === 'l' || text === 'L') {
       app.openLog('orchestrator');
+      return;
+    }
+    if (/^[0-6]$/.test(text)) {
+      app.openLog(text === '0' ? 'orchestrator' : AGENT_ORDER[Number(text) - 1]);
       return;
     }
     if (text === 'm' || text === 'M') {
@@ -1989,11 +2091,6 @@ async function runTui(mode, options) {
   const onResize = () => {
     const nextWidth = out.columns || width;
     const nextHeight = out.rows || height;
-    if (nextWidth < MIN_WIDTH || nextHeight < MIN_HEIGHT) {
-      small = true;
-      stop(1);
-      return;
-    }
     app.resize(nextWidth, nextHeight);
   };
 
@@ -2041,6 +2138,8 @@ async function runTui(mode, options) {
       if (mode === 'task') {
         app.addLog('ready · type a task below');
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'ready · type a task below' });
+      } else if (mode === 'demo' && (options.workerPreview || options.factoryPreview)) {
+        // The audition is a local, silent scene; the shared render clock animates it.
       } else if (mode === 'demo') {
         demoHandle = playDemo(app, {
           onDone: () => {
@@ -2105,11 +2204,6 @@ async function runTui(mode, options) {
     }
 
     const code = await done;
-    if (small) {
-      process.stderr.write(
-        `theFactory needs a terminal of at least ${MIN_WIDTH}x${MIN_HEIGHT} (got ${out.columns || width}x${out.rows || height}).\n`,
-      );
-    }
     if (fatal) {
       process.stderr.write(`thefactory: ${fatal.message ?? String(fatal)}\n`);
     }

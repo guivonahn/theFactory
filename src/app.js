@@ -4,13 +4,15 @@
  */
 
 import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './agents.js';
-import { Canvas, displayWidth, stripAnsi, truncate, wrapText } from './canvas.js';
+import { Canvas, charWidth, displayWidth, stripAnsi, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
-import { buildLayout } from './layout.js';
+import { buildLayout, trackCellsFor } from './layout.js';
 import { highlightLine } from './highlight.js';
 import { formatReset } from './goUsage.js';
-import { drawFactory } from '../workin_on/factory.js';
+import { drawFactory, factoryGeometry } from './factory.js';
 import { formatLogEntries, LOG_FILTERS, logMatches } from './logFormat.js';
+import { drawWorker, prefersReducedMotion, WORKER_DESIGNS } from './creatures.js';
+import { promptProgress, progressBar } from './progress.js';
 import {
   createQuestionState,
   currentField,
@@ -51,6 +53,8 @@ function freshAgent(def) {
     toolCount: 0,
     sessions: 1,
     status: 'idle',
+    workerState: 'idle',
+    workerSince: 0,
     flashUntil: 0,
     pulseUntil: 0,
   };
@@ -61,6 +65,7 @@ function clean(value) {
 }
 
 function statusGlyph(state, now, spinner = '●') {
+  if (state.workerState === 'failed') return { glyph: '?', color: T.warning };
   if (state.status === 'done') return { glyph: '✓', color: T.success };
   if (state.status === 'working') return { glyph: spinner, color: state.def.color };
   const pulse = Math.floor(now / 450) % 2 === 0;
@@ -77,12 +82,16 @@ export class App {
     this.color = options.color !== false;
     this.mode = options.mode ?? 'demo';
     this.inputMode = Boolean(options.inputMode);
+    this.reducedMotion = options.reducedMotion ?? prefersReducedMotion();
+    this.workerPreview = Boolean(options.workerPreview);
+    this.factoryPreview = Boolean(options.factoryPreview);
+    this.orchestratorWorker = { workerState: 'idle', workerSince: 0 };
     // Sound hook: (name: 'pop' | 'error') => void. The TUI wires this to
     // src/sound.js; snapshots/tests leave it null so replay stays silent.
     this.onSound = typeof options.onSound === 'function' ? options.onSound : null;
     this.footerRows = this.inputMode ? 3 : 1;
     this.canvas = new Canvas(this.width, this.height, { color: this.color });
-    this.layout = buildLayout(this.width, this.height, { footerRows: this.footerRows });
+    this.layout = buildLayout(this.width, this.height, { footerRows: this.footerRows, workers: true });
     this._indexSlots();
 
     this.agents = new Map();
@@ -116,6 +125,10 @@ export class App {
     this.sessionID = null;
     this.sessionTitle = null;
     this.inputValue = '';
+    this.inputCursor = 0;
+    this.promptTasks = [];
+    this.runPhase = 'working';
+    this.completionOverview = null;
     this.run = {
       state: 'idle',
       pid: null,
@@ -126,11 +139,43 @@ export class App {
     };
     this.parallel = {
       enabled: false,
+      tasks: [],
+      concurrency: 3,
       workers: [
         // { workerId, taskId, role, sessionId, state }
       ],
       counts: { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 },
     };
+    if (this.workerPreview) {
+      const poses = ['working', 'thinking', 'idle', 'completed', 'failed', 'working'];
+      AGENT_ORDER.forEach((key, index) => {
+        const state = this.agents.get(key);
+        state.status = poses[index] === 'completed' ? 'done' : poses[index] === 'failed' || poses[index] === 'idle' ? 'idle' : 'working';
+        state.workerState = poses[index];
+        state.messages.push({ dir: 'in', text: `${this._workerDesign(this._slots.get(key))} · ${poses[index]}` });
+      });
+      this.activity = 'Worker audition · dumpling selected';
+      this.orchestratorWorker.workerState = 'thinking';
+    }
+    if (this.factoryPreview) {
+      this.activity = 'Factory preview · a little team at work';
+      this.orchestratorWorker.workerState = 'thinking';
+      this.setAgentStatus('explorer', 'done');
+      this.setAgentStatus('architect', 'done');
+      this.setParallelTasks([
+        { id: 'map', state: 'completed' }, { id: 'design', state: 'completed' },
+        { id: 'ui', state: 'running' }, { id: 'engine', state: 'running' },
+        { id: 'review', state: 'running' }, { id: 'verify', state: 'pending' },
+      ], 4);
+      this.setParallelWorkers([
+        { workerId: 'preview-ui', taskId: 'ui', role: 'developer', state: 'running' },
+        { workerId: 'preview-engine', taskId: 'engine', role: 'developer', state: 'running' },
+        { workerId: 'preview-review', taskId: 'review', role: 'reviewer', state: 'running' },
+      ]);
+      this._setWorker(this.agents.get('developer'), 'working');
+      this.agents.get('developer').messages.push({ dir: 'out', text: 'UI and engine · two independent scopes' });
+      this.agents.get('reviewer').messages.push({ dir: 'out', text: 'Inspecting the finished design' });
+    }
   }
 
   _indexSlots() {
@@ -138,6 +183,8 @@ export class App {
     if (!this.layout.tooSmall) {
       for (const slot of this.layout.agents) this._slots.set(slot.key, slot);
       this._slots.set('other', this.layout.other);
+      this._tracks = trackCellsFor(this.layout.agents);
+      this._otherTracks = trackCellsFor([...this.layout.agents, this.layout.other]);
     }
   }
 
@@ -146,8 +193,15 @@ export class App {
     this.width = width;
     this.height = height;
     this.canvas.resize(width, height);
-    this.layout = buildLayout(width, height, { footerRows: this.footerRows });
+    this.layout = buildLayout(width, height, { footerRows: this.footerRows, workers: true });
     this._indexSlots();
+    for (const packet of this.packets) {
+      const slot = this._slots.get(packet.agentKey);
+      if (!slot) continue;
+      const fraction = packet.progress / Math.max(1, packet.path.length - 1);
+      packet.path = packet.dir === 'in' ? [...slot.returnPath].reverse() : slot.path;
+      packet.progress = fraction * Math.max(0, packet.path.length - 1);
+    }
     return !this.layout.tooSmall;
   }
 
@@ -182,7 +236,7 @@ export class App {
   }
 
   _spinner() {
-    return SPINNER_FRAMES[Math.floor(this.now / 180) % SPINNER_FRAMES.length];
+    return SPINNER_FRAMES[this.reducedMotion ? 0 : Math.floor(this.now / 180) % SPINNER_FRAMES.length];
   }
 
   /** Keep a small orchestrator log (20 entries max) for task mode. */
@@ -208,9 +262,36 @@ export class App {
   openLog(agentKey = 'orchestrator') {
     const key = agentKey === 'orchestrator' ? 'orchestrator' : this._agentKey(agentKey);
     this.logView.open = true;
+    this.logView.overview = false;
     this.logView.agentKey = key;
     this.logView.scroll = 0;
     this.logView.paused = false;
+  }
+
+  setCompletionOverview(text, { open = true } = {}) {
+    this.completionOverview = { text: stripAnsi(text), kind: 'message', dir: 'in', at: this.now };
+    this.addLog(text, { kind: 'message', dir: 'in' });
+    if (open) this.openOverview();
+  }
+
+  openOverview() {
+    if (!this.completionOverview) return false;
+    this.openLog('orchestrator');
+    this.logView.overview = true;
+    this.logView.scroll = Number.MAX_SAFE_INTEGER;
+    this.logView.paused = true;
+    return true;
+  }
+
+  setPromptTasks(tasks) {
+    this.promptTasks = tasks.map((task, index) => ({
+      id: task.id || `step-${index + 1}`, title: String(task.content || task.title || `Step ${index + 1}`),
+      state: ({ in_progress: 'running', pending: 'pending', completed: 'completed', cancelled: 'cancelled' })[task.status] || task.state || 'pending',
+    }));
+  }
+
+  getPromptProgress() {
+    return promptProgress({ tasks: this.parallel.enabled ? this.parallel.tasks : this.promptTasks, runState: this.run.state, phase: this.runPhase, overviewReady: Boolean(this.completionOverview) });
   }
 
   /** Map a terminal (1-based) click to an agent whose msg counter was hit. */
@@ -222,6 +303,8 @@ export class App {
       const slot = this._slots.get(key);
       if (!slot) continue;
       const box = slot.box;
+      if (slot.worker && cy >= slot.worker.row && cy < box.row && cx >= box.col && cx < box.col + box.width) return key;
+      if (box.height < 5 && cy >= box.row && cy < box.row + box.height && cx >= box.col && cx < box.col + box.width) return key;
       const statsRow = box.row + box.height - 2;
       if (cy !== statsRow) continue;
       if (cx < box.col + 2 || cx > box.col + box.width - 3) continue;
@@ -316,6 +399,7 @@ export class App {
 
   /** Cycle through orchestrator + 6 pillars + other. dir is ±1. */
   cycleLogAgent(dir) {
+    this.logView.overview = false;
     const order = ['orchestrator', ...AGENT_ORDER, 'other'];
     let index = order.indexOf(this.logView.agentKey);
     if (index < 0) index = 0;
@@ -332,6 +416,7 @@ export class App {
   }
 
   cycleLogFilter() {
+    if (this.logView.overview) return;
     this.logView.filter = LOG_FILTERS[(LOG_FILTERS.indexOf(this.logView.filter) + 1) % LOG_FILTERS.length];
     this.logView.scroll = 0;
     this.logCache = null;
@@ -349,6 +434,7 @@ export class App {
 
   /** Entries for the selected log-view agent (orchestrator uses centerLog). */
   _logEntries() {
+    if (this.logView.overview && this.completionOverview) return [this.completionOverview];
     const key = this.logView.agentKey;
     const entries = key === 'orchestrator' ? this.orchestratorHistory : this.agents.get(key)?.history ?? [];
     return entries.filter((entry) => logMatches(entry, this.logView.filter));
@@ -361,7 +447,7 @@ export class App {
 
   _logRows(visibleRows) {
     const width = this.width - 8;
-    const key = `${this.logView.agentKey}:${this.logView.filter}:${width}`;
+    const key = `${this.logView.agentKey}:${this.logView.filter}:${Boolean(this.logView.overview)}:${width}`;
     if (!this.logCache || this.logCache.key !== key || this.logCache.revision !== this.logRevision) {
       const previous = this.logCache;
       const lines = this._logEntries().flatMap((entry) => {
@@ -371,7 +457,7 @@ export class App {
           this.logEntryCache.set(entry, cached);
         }
         return cached.lines;
-      });
+      }).slice(this.logView.overview ? 1 : 0);
       if (previous?.key === key && (this.logView.scroll > 0 || this.logView.paused)) {
         this.logView.scroll += Math.max(0, lines.length - previous.lines.length);
       }
@@ -395,14 +481,22 @@ export class App {
     }
     return cursor;
   }
-  setInputValue(value) {
+  setInputValue(value, cursor = null) {
     this.inputValue = String(value ?? '');
+    const length = Array.from(this.inputValue).length;
+    this.inputCursor = cursor == null ? length : Math.max(0, Math.min(length, cursor));
   }
 
   /** Enter the running state for a spawned task. */
-  startRun({ pid = null, sessionID = null, resumed = false, parallel = null } = {}) {
+  startRun({ pid = null, sessionID = null, resumed = false, parallel = null, objective = '' } = {}) {
+    this.promptTasks = [];
+    this.runPhase = parallel ? 'planning' : 'working';
+    this.completionOverview = null;
+    this.parallel = { enabled: Boolean(parallel), workers: [], tasks: [], concurrency: parallel?.workers ?? 3, counts: { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 } };
+    this._setWorker(this.orchestratorWorker, 'thinking');
     this.run = {
       state: 'running',
+      objective,
       pid,
       sessionID,
       resumed: Boolean(resumed),
@@ -427,13 +521,49 @@ export class App {
   /** Replace parallel worker panel from real manager counts (no invention). */
   setParallelWorkers(workers) {
     this.parallel.enabled = true;
-    this.parallel.workers = Array.isArray(workers) ? workers.slice(0, 12) : [];
+    this.parallel.workers = Array.isArray(workers) ? workers.slice() : [];
     const counts = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
     for (const w of this.parallel.workers) {
       if (w.state && counts[w.state] !== undefined) counts[w.state] += 1;
     }
     this.parallel.counts = counts;
+    const groups = new Map();
+    for (const worker of this.parallel.workers) {
+      const key = this._agentKey(worker.role);
+      const group = groups.get(key) ?? [];
+      group.push(worker);
+      groups.set(key, group);
+    }
+    for (const [key, state] of this.agents) {
+      const group = groups.get(key) ?? [];
+      state.workerCount = group.filter((worker) => worker.state === 'running' || worker.state === 'queued').length;
+      if (!group.length) continue;
+      if (key === 'other') this.showOther = true;
+      if (state.workerCount) {
+        state.status = 'working';
+        if (!['working', 'thinking'].includes(state.workerState)) this._setWorker(state, 'thinking');
+      } else if (group.some((worker) => worker.state === 'failed')) {
+        state.status = 'idle'; this._setWorker(state, 'failed');
+      } else if (group.some((worker) => worker.state === 'completed')) {
+        state.status = 'done'; this._setWorker(state, 'completed');
+      } else { state.status = 'idle'; this._setWorker(state, 'idle'); }
+    }
     return counts;
+  }
+
+  setParallelTasks(tasks, concurrency = this.parallel.concurrency) {
+    this.parallel.tasks = Array.isArray(tasks) ? tasks.map((task) => ({ ...task })) : [];
+    this.parallel.concurrency = concurrency;
+  }
+
+  _parallelSummary() {
+    const tasks = this.parallel.tasks;
+    const count = (states) => tasks.filter((task) => states.includes(task.state)).length;
+    const running = tasks.length ? count(['running']) : this.parallel.counts.running;
+    const waiting = count(['pending', 'ready']);
+    const completed = tasks.length ? count(['completed']) : this.parallel.counts.completed;
+    const bad = count(['failed', 'blocked', 'cancelled']);
+    return `${running}/${this.parallel.concurrency} run ${bad ? `!${bad}` : `q${waiting}`} ✓${completed}`;
   }
 
   setParallelEnabled(enabled) {
@@ -449,7 +579,8 @@ export class App {
   settleWorkingAgents(status = 'done') {
     for (const state of this.agents.values()) {
       if (state.status === 'working') {
-        state.status = status === 'idle' ? 'idle' : 'done';
+        state.status = status === 'idle' || status === 'error' ? 'idle' : 'done';
+        this._setWorker(state, state.status === 'done' ? 'completed' : status === 'error' ? 'failed' : 'idle');
         if (state.status === 'done') state.flashUntil = this.now + 500;
       }
     }
@@ -468,7 +599,18 @@ export class App {
     } else if (status === 'working') {
       if (state.status !== 'working') this.cueSound('pop');
       state.status = 'working';
+    } else if (status === 'thinking') {
+      state.status = 'working';
+    } else if (status === 'error' || status === 'failed') {
+      state.status = 'idle';
     }
+    this._setWorker(state, status === 'done' ? 'completed' : status === 'error' || status === 'failed' ? 'failed' : status);
+  }
+
+  _setWorker(state, pose) {
+    if (state.workerState === pose) return;
+    state.workerState = pose;
+    state.workerSince = this.now;
   }
 
   /** Mark the current run done, aborted or failed. */
@@ -477,11 +619,12 @@ export class App {
     // failures, nolimit/viewer setup errors and permission failures.
     if (state === 'error') this.cueSound('error');
     else if (state === 'done') this.cueSound('completed');
-    const duration = this.run.startedAt ? Math.max(0, this.now - this.run.startedAt) : 0;
+    const duration = this.run.state === 'running' ? Math.max(0, this.now - this.run.startedAt) : this.run.duration;
     this.run = { ...this.run, state, duration, detail: clean(detail) };
+    this._setWorker(this.orchestratorWorker, state === 'done' ? 'completed' : state === 'error' ? 'failed' : 'idle');
     // A finished run must clear the ACTIVE AGENTS panel; otherwise pillars
     // fed by live worker messages stay stuck on spinner-forever "working".
-    this.settleWorkingAgents(state === 'done' ? 'done' : 'idle');
+    this.settleWorkingAgents(state === 'done' ? 'done' : state === 'error' ? 'error' : 'idle');
     if (state === 'done') {
       const suffix = this.run.detail ? ` · ${truncate(this.run.detail, 56)}` : '';
       this.activity = `✓ task complete in ${Math.max(1, Math.floor(duration / 1000))}s${suffix}`;
@@ -590,6 +733,8 @@ export class App {
     // Real payload size in bytes drives the KB node count downstream.
     const bytes = event.bytes ?? Buffer.byteLength(text, 'utf8');
     state.status = 'working';
+    this._setWorker(state, 'thinking');
+    this._setWorker(this.orchestratorWorker, 'thinking');
     // Orchestrator -> agent: "an agent is called" gets the pop cue.
     if (dir === 'out') this.cueSound('pop');
 
@@ -607,6 +752,7 @@ export class App {
   _applyTool(event) {
     const key = this._agentKey(event.from ?? event.agent ?? 'other');
     if (key === 'orchestrator') {
+      this._setWorker(this.orchestratorWorker, event.logEntry?.status === 'error' ? 'failed' : 'working');
       const detail = clean(event.text);
       if (!event.logRecorded) this.addLog(event.logEntry?.text ?? event.text, { kind: 'tool', ...event.logEntry });
       this.totalTools += 1;
@@ -639,6 +785,7 @@ export class App {
     this.cueSound('pop');
     state.toolCount += 1;
     state.status = 'working';
+    this._setWorker(state, event.logEntry?.status === 'error' ? 'failed' : 'working');
     state.pulseUntil = this.now + 1000;
     this.totalTools += 1;
     this.totalKb += 1;
@@ -667,6 +814,7 @@ export class App {
   _applyStatus(event) {
     const text = clean(event.text);
     if (event.from === ORCHESTRATOR.key || !event.from) {
+      if (event.state) this._setWorker(this.orchestratorWorker, event.state === 'done' ? 'completed' : event.state === 'error' || event.state === 'failed' ? 'failed' : event.state);
       if (text) this.activity = text;
       this.centerFlashUntil = this.now + 180;
       if (text && !event.logRecorded) this.addLog(event.logEntry?.text ?? event.text, event.logEntry);
@@ -678,33 +826,30 @@ export class App {
     if (key === 'other') this.showOther = true;
     if (text && !event.logRecorded) this._pushHistory(state, { dir: 'status', text: stripAnsi(event.text), kind: 'status', at: this.now, ...event.logEntry });
     const lowered = text.toLowerCase();
+    const failed = event.state === 'error' || event.state === 'failed' || /✗|\b(?:fail(?:ed|ure)?|error)\b/.test(lowered);
+    const settled = event.state === 'idle' || failed || /\b(?:idle|cancel(?:led|ed)?|abort(?:ed)?)\b/.test(lowered);
+    const completed = /\b(?:done|complete[ds]?|finish(?:ed)?)\b/.test(lowered);
     // Explicit terminal state wins first, then keyword heuristics. Failure
     // keywords must settle to idle — previously any unknown status text fell
     // through to "working", so "✗ failed" left the agent spinning forever.
-    if (event.state === 'done' || lowered.includes('done') || lowered.includes('complete') || lowered.includes('finish')) {
+    if (event.state === 'done') {
       state.status = 'done';
       state.flashUntil = this.now + 500;
-    } else if (
-      event.state === 'idle' || lowered.includes('idle') ||
-      lowered.includes('✗') || lowered.includes('fail') ||
-      lowered.includes('error') || lowered.includes('cancel') ||
-      lowered.includes('abort')
-    ) {
+    } else if (settled) {
       state.status = 'idle';
       // Tool/runtime failures surface as error cues (finishRun covers the
       // terminal task failure; this covers mid-run pillar failures).
-      if (
-        lowered.includes('✗') || lowered.includes('fail') ||
-        lowered.includes('error') ||
-        event.state === 'error'
-      ) {
-        this.cueSound('error');
-      }
-    } else if (event.state === 'working') {
+      if (failed) this.cueSound('error');
+    } else if (event.state === 'working' || event.state === 'thinking') {
       state.status = 'working';
+    } else if (completed) {
+      state.status = 'done';
+      state.flashUntil = this.now + 500;
     } else {
       state.status = 'working';
     }
+    this._setWorker(state, state.status === 'done' ? 'completed' : failed ? 'failed'
+      : state.status === 'idle' ? 'idle' : /think|plan|wait|reason/.test(lowered) || event.state === 'thinking' ? 'thinking' : 'working');
     if (text) this.activity = `${state.def.label.toLowerCase()}: ${truncate(text, 64)}`;
   }
 
@@ -746,30 +891,13 @@ export class App {
   }
 
   _drawBranches() {
+    for (const cell of this.showOther ? this._otherTracks : this._tracks) {
+      this.canvas.put(cell.row, cell.col, cell.glyph, GRAY.gray2);
+    }
     for (const [key, slot] of this._slots) {
       if (key === 'other' && !this.showOther) continue;
-      // Two-way flux: one lane going out, one coming back.
-      for (const path of [slot.path, slot.returnPath]) {
-        for (let index = 0; index < path.length; index += 1) {
-          const cell = path[index];
-          const prev = path[index - 1];
-          const next = path[index + 1];
-          let glyph = '─';
-          if (prev && next) {
-            if (prev.row === cell.row && next.row === cell.row) glyph = '─';
-            else if (prev.col === cell.col && next.col === cell.col) glyph = '│';
-            else glyph = '+';
-          } else if (next) {
-            glyph = next.row === cell.row ? '─' : '│';
-          } else if (prev) {
-            glyph = prev.row === cell.row ? '─' : '│';
-          }
-          this.canvas.put(cell.row, cell.col, glyph, T.border);
-        }
-      }
-
       const state = this.agents.get(key);
-      if (state && state.pulseUntil > this.now) {
+      if (state && !this.reducedMotion && state.pulseUntil > this.now) {
         const count = Math.min(6, slot.path.length);
         for (let offset = 1; offset <= count; offset += 1) {
           const cell = slot.path[slot.path.length - offset];
@@ -785,7 +913,7 @@ export class App {
     // centered factory building; otherwise skip so the skyline stays intact.
     if (this.layout.sky.rows < 4 || this.width < 120) return;
     const width = 20;
-    const maxHeight = this.layout.sky.rows + 1;
+    const maxHeight = this.layout.sky.rows;
     const working = [...this.agents.entries()].filter(([key, state]) => (
       state.status === 'working' && (key !== 'other' || this.showOther)
     ));
@@ -799,7 +927,7 @@ export class App {
     this.canvas.write(0, Math.max(1, Math.floor((width - displayWidth(title)) / 2)), title, style);
 
     if (working.length === 0) {
-      const pulse = Math.floor(this.now / 450) % 2 === 0;
+      const pulse = this.reducedMotion || Math.floor(this.now / 450) % 2 === 0;
       this.canvas.write(1, 2, '○ none working', pulse ? T.textSecondary : T.border);
       return;
     }
@@ -807,7 +935,7 @@ export class App {
     const overflow = working.length > contentRows;
     const visibleCount = overflow ? contentRows - 1 : working.length;
     working.slice(0, visibleCount).forEach(([, state], index) => {
-      this.canvas.write(1 + index, 2, truncate(`${this._spinner()} ${state.def.label.toUpperCase()}`, width - 4), state.def.color);
+      this.canvas.write(1 + index, 2, truncate(`${this._spinner()} ${state.def.label.toUpperCase()}${state.workerCount > 1 ? ` ×${state.workerCount}` : ''}`, width - 4), state.def.color);
     });
     if (overflow) {
       this.canvas.write(height - 2, 2, `+${working.length - visibleCount} more`, T.textSecondary);
@@ -822,7 +950,7 @@ export class App {
     const col = this.width - width;
     const rolling = this.goUsage?.rolling;
     const linked = rolling && Number.isFinite(rolling.percent) && typeof rolling.resetsAt === 'string';
-    const maxHeight = this.layout.sky.rows + 1;
+    const maxHeight = this.layout.sky.rows;
     const height = Math.min(maxHeight, linked ? 4 : 3);
     const percent = linked ? Math.round(rolling.percent) : 0;
     const color = !linked
@@ -851,32 +979,37 @@ export class App {
 
   _drawCenter() {
     const box = this.layout.center;
+    const working = [...this.agents.values()].filter((state) => state.status === 'working').length;
+    const total = this.showOther ? 7 : 6;
     const flash = this.centerFlashUntil > this.now;
     const style = flash ? this.centerFlashColor : ORCHESTRATOR.color;
     this.canvas.box(box.row, box.col, box.width, box.height, style, ORCHESTRATOR.label);
 
-    const inner = box.width - 2;
-    if (this.inputMode && this.centerLog.length > 0) {
-      const recent = this.centerLog.slice(-3);
-      recent.forEach((line, index) => {
-        const style = index === recent.length - 1 ? T.textPrimary : T.textSecondary;
-        this._writeHighlighted(box.row + 1 + index, box.col + 2, line, inner - 2, style);
-      });
-    } else {
-      const dots = this.run.state === 'running' ? '.'.repeat((Math.floor(this.now / 450) % 3) + 1) : '';
-      const lines = wrapText(`${this.activity}${dots}`, inner - 4);
-      this._writeHighlighted(box.row + 1, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, inner - 2, T.textPrimary);
-      this.canvas.write(box.row + 2, box.col + 2, truncate(lines[1] ?? '', inner - 2), T.textSecondary);
+    if (box.height < 7) {
+      this._writeHighlighted(box.row + 1, box.col + 2, `${ORCHESTRATOR.name} · ${this.workerPreview ? 'dumpling' : this.activity}`, box.width - 4);
+      if (box.height >= 4) this.canvas.write(box.row + 2, box.col + 2, truncate(this.workerPreview ? 'bean / puff' : this.parallel.enabled ? this._parallelSummary() : `${working}/${total} working`, box.width - 4), T.textSecondary);
+      return;
     }
 
-    const working = [...this.agents.values()].filter((state) => state.status === 'working').length;
+    const inner = box.width - 2;
+    this.canvas.write(box.row + 1, box.col + 2, truncate(`${ORCHESTRATOR.name} · ${this.orchestratorWorker.workerState}`, inner - 2), style);
+    if (this.inputMode && this.centerLog.length > 0) {
+      const recent = this.centerLog.slice(-2);
+      recent.forEach((line, index) => {
+        const style = index === recent.length - 1 ? T.textPrimary : T.textSecondary;
+        this._writeHighlighted(box.row + 2 + index, box.col + 2, line, inner - 2, style);
+      });
+    } else {
+      const dots = this.run.state === 'running' && !this.reducedMotion ? '.'.repeat((Math.floor(this.now / 450) % 3) + 1) : '';
+      const lines = wrapText(`${this.activity}${dots}`, inner - 4);
+      this._writeHighlighted(box.row + 2, box.col + 2, `› ${truncate(lines[0] ?? '', inner - 4)}`, inner - 2, T.textPrimary);
+      this.canvas.write(box.row + 3, box.col + 2, truncate(lines[1] ?? '', inner - 2), T.textSecondary);
+    }
+
     const spin = this._spinner();
-    // Row 3 hosts the real parallel worker list when enabled (inputMode log
-    // uses rows 1-3 for logs, so only draw when not colliding with 3 log lines).
-    if (this.parallel?.enabled && (!this.inputMode || this.centerLog.length < 3)) {
-      const list = (this.parallel.workers ?? []).slice(0, 2).map((w) => `${w.role ?? '?'}:${w.taskId ?? '?'} ${w.state ?? '?'}`).join(' · ');
-      const extra = this.parallel.workers.length > 2 ? ` · +${this.parallel.workers.length - 2}w` : '';
-      this.canvas.write(box.row + 3, box.col + 2, truncate(list ? `workers: ${list}${extra}` : 'workers: none', inner - 2), T.textSecondary);
+    // The last log/activity row gives way to the parallel worker count.
+    if (this.parallel?.enabled && (!this.inputMode || this.centerLog.length < 2)) {
+      this.canvas.write(box.row + 3, box.col + 2, truncate(this._parallelSummary(), inner - 2), T.textSecondary);
     }
     this._writeHighlighted(
       box.row + 4,
@@ -885,11 +1018,11 @@ export class App {
       inner - 2,
       GRAY.gray2,
     );
-    const idlePulse = Math.floor(this.now / 450) % 2 === 0;
+    const idlePulse = this.reducedMotion || Math.floor(this.now / 450) % 2 === 0;
     this.canvas.write(
       box.row + 5,
       box.col + 2,
-      truncate(`${working ? spin : '○'} ${working}/6 agents working${working ? '' : ' · idle'}`, inner - 2),
+      truncate(`${working ? spin : '○'} ${working}/${total} working`, inner - 2),
       working ? T.textPrimary : idlePulse ? T.textSecondary : T.border,
     );
   }
@@ -901,27 +1034,45 @@ export class App {
       if (!slot) continue;
       const box = slot.box;
       const def = state.def;
-      const status = statusGlyph(state, this.now, this._spinner());
-      const border = state.flashUntil > this.now ? T.textPrimary : state.status === 'idle' ? T.border : def.color;
-      this.canvas.box(box.row, box.col, box.width, box.height, border, def.label);
+      const label = `${def.label}${state.workerCount > 1 ? ` ×${state.workerCount}` : ''}`;
+      const status = statusGlyph(state, this.reducedMotion ? 0 : this.now, this._spinner());
+      const border = state.flashUntil > this.now ? T.textPrimary : state.workerState === 'failed' ? T.warning : state.status === 'idle' ? T.border : def.color;
+      if (box.height < 5) {
+        const workerLabel = state.workerState === 'completed' ? 'done' : state.workerState;
+        this.canvas.fill(box.row, box.col, box.width, box.height);
+        this.canvas.write(box.row, box.col + 2, truncate(`${status.glyph} ${def.label}`, box.width - 4), def.color);
+        const name = def.name ?? def.key;
+        const detail = `${name} · ${workerLabel}`;
+        this.canvas.write(box.row + 1, box.col + 2, displayWidth(detail) <= box.width - 4 ? detail : name, def.color);
+        if (box.height >= 3) this.canvas.write(box.row + 2, box.col + 2, truncate(state.messages.at(-1)?.text ?? def.role, box.width - 4), T.textSecondary);
+        if (box.height >= 4) this.canvas.write(box.row + 3, box.col + 2, truncate(`msg:${state.messageCount} tool:${state.toolCount}`, box.width - 4), T.textSecondary);
+        continue;
+      }
+      const shownLabel = truncate(label, box.width - 6);
+      this.canvas.box(box.row, box.col, box.width, box.height, border, shownLabel);
+      const titleCol = box.col + Math.max(2, Math.floor((box.width - displayWidth(shownLabel) - 2) / 2));
+      this.canvas.write(box.row, titleCol, ` ${shownLabel} `, def.color);
       const inner = box.width - 2;
       const stamp = { glyph: status.glyph, color: status.color };
       this.canvas.put(box.row, box.col + box.width - 2, stamp.glyph, stamp.color);
 
-      const feedRows = Math.max(2, box.height - 3);
+      this.canvas.write(box.row + 1, box.col + 2, truncate(`${def.name ?? def.key} · ${state.workerState === 'completed' ? 'done' : state.workerState}`, inner - 2), def.color);
+      const feedRows = Math.max(1, box.height - 4);
+      const messages = state.messages.slice(-feedRows);
       for (let index = 0; index < feedRows; index += 1) {
-        const message = state.messages[index];
+        const message = messages[index];
         if (!message) {
           if (index === 0 && state.messageCount === 0) {
-            const line = state.status === 'working' ? `working ${this._spinner()}` : `${status.glyph} waiting for task`;
-            const color = state.status === 'working' ? def.color : status.color;
-            this.canvas.write(box.row + 1, box.col + 2, truncate(line, inner - 2), color);
+            const line = state.workerState === 'completed' ? '✓ task complete' : state.workerState === 'failed' ? '? failed · see log'
+              : state.status === 'working' ? `${state.workerState} ${this._spinner()}` : `${status.glyph} waiting for task`;
+            const color = state.status === 'working' ? def.color : state.workerState === 'failed' ? T.warning : T.textSecondary;
+            this.canvas.write(box.row + 2, box.col + 2, truncate(line, inner - 2), color);
           }
           continue;
         }
         const prefix = message.dir === 'out' ? '»' : '«';
-        this.canvas.put(box.row + 1 + index, box.col + 2, prefix, def.color);
-        this._writeHighlighted(box.row + 1 + index, box.col + 4, message.text, inner - 4, T.textPrimary);
+        this.canvas.put(box.row + 2 + index, box.col + 2, prefix, def.color);
+        this._writeHighlighted(box.row + 2 + index, box.col + 4, message.text, inner - 4, T.textPrimary);
       }
 
       const sessions = state.sessions > 1 ? ` · ${state.sessions} sess` : '';
@@ -935,6 +1086,7 @@ export class App {
   }
 
   _drawPackets() {
+    if (this.reducedMotion) return;
     for (const packet of this.packets) {
       if (this.now < packet.startAt) continue;
       const index = Math.min(packet.path.length - 1, Math.max(0, Math.floor(packet.progress)));
@@ -957,6 +1109,19 @@ export class App {
     }
   }
 
+  _drawPorts() {
+    const center = this.layout.center;
+    for (const [key, slot] of this._slots) {
+      if (key === 'other' && !this.showOther) continue;
+      for (const path of [slot.path, slot.returnPath]) {
+        const source = path[0], target = path.at(-1);
+        const sourceGlyph = source.row === center.row + center.height - 1 ? '┬' : source.col === center.col ? '┤' : '├';
+        this.canvas.put(source.row, source.col, sourceGlyph, GRAY.gray2);
+        this.canvas.put(target.row, target.col, target.col === slot.box.col ? '┤' : '├', GRAY.gray2);
+      }
+    }
+  }
+
   _drawInput() {
     if (this.layout.inputRow == null) return;
     const rows = this.layout.inputRows ?? [this.layout.inputRow];
@@ -971,14 +1136,29 @@ export class App {
       this.canvas.put(row, promptCol, '▌', T.textPrimary);
       return;
     }
-    // Multiline prompt: collapsed `[pasted n lines]` preview (like opencode),
-    // full buffer preserved for submit. Viewport = last line.
-    const all = String(this.inputValue).split(/\r\n|\r|\n/);
+    // Preserve whitespace and follow the real caret, including wide glyphs.
+    // Pasted lines stay collapsed; editing an earlier line reveals that line.
+    const all = this.inputValue.replace(/\r\n|\r/g, '\n').split('\n');
+    const before = Array.from(this.inputValue).slice(0, this.inputCursor).join('').replace(/\r\n|\r/g, '\n').split('\n');
     const total = all.length;
-    const lastLine = (all[all.length - 1] ?? '').replace(/\r$/, '');
+    const currentLine = all[before.length - 1] ?? '';
     const prefix = total > 1 ? `[pasted ${total} lines] ` : '';
-    const lines = wrapText(prefix + lastLine, inner);
-    const visible = lines.slice(-rows.length);
+    const chars = Array.from(stripAnsi(prefix + currentLine));
+    const caret = Array.from(stripAnsi(prefix + before.at(-1))).length;
+    const lines = [''];
+    let used = 0;
+    let cursorPoint = { row: 0, col: 0 };
+    for (let index = 0; index <= chars.length; index++) {
+      const glyph = chars[index];
+      const cells = glyph ? charWidth(glyph) : 0;
+      if (used + cells > inner - 1) { lines.push(''); used = 0; }
+      if (index === caret) cursorPoint = { row: lines.length - 1, col: used };
+      if (!glyph) break;
+      lines[lines.length - 1] += glyph;
+      used += cells;
+    }
+    const start = Math.max(0, Math.min(cursorPoint.row, lines.length - rows.length));
+    const visible = lines.slice(start, start + rows.length);
     visible.forEach((line, index) => {
       const row = rows[index];
       const marker = prefix.trimEnd(); // '[pasted N lines]'
@@ -990,9 +1170,7 @@ export class App {
         this.canvas.write(row, promptCol, line, T.textPrimary);
       }
     });
-    const lastRow = rows[visible.length - 1];
-    const cursorCol = promptCol + displayWidth(visible[visible.length - 1] ?? '');
-    this.canvas.put(lastRow, cursorCol, '▌', T.textPrimary);
+    this.canvas.put(rows[cursorPoint.row - start], promptCol + cursorPoint.col, '▌', T.textPrimary);
   }
 
   _drawStatus() {
@@ -1000,7 +1178,7 @@ export class App {
       ? ' · esc abort · /log log · Enter×2 steer'
       : ' · /sessions pick · /new fresh · /log log';
     const sessionSuffix = this.sessionID ? ` · session ${this.sessionID}` : '';
-    const prefix = this.inputMode
+    const prefix = this.factoryPreview ? `Factory preview · ${this._parallelSummary()} · q quit` : this.workerPreview ? 'Worker audition · dumpling (selected) / bean / puff · q quit' : this.inputMode
       ? `theFactory · task · ${this._runStatusLine()}${idleTaskHint}${sessionSuffix}`
       : `theFactory · ${this.mode} · ${this.totalMessages} msgs · ${this.packets.length} packet(s) · q quit${sessionSuffix}`;
     const statusColor = !this.inputMode
@@ -1010,9 +1188,21 @@ export class App {
         : this.run.state === 'done'
           ? T.success
           : T.textSecondary;
-    this.canvas.write(this.layout.statusRow, 1, truncate(prefix, this.width - 2), statusColor);
     const right = `${this.width}×${this.height}`;
-    this.canvas.write(this.layout.statusRow, this.width - right.length - 1, right, T.border);
+    const rightCol = this.width - right.length - 1;
+    let compactPrefix = this.inputMode && this.width < 100 && !this.workerPreview
+      ? this.run.state === 'error' ? `failed · /log logs · ${this.run.detail}`
+        : `${this.run.state === 'running' ? `running · ${this.runElapsedSeconds()}s · Esc abort` : this.run.state === 'done' ? '✓ task complete' : 'ready · Enter run'} · /log logs`
+      : prefix;
+    if (!this.workerPreview && (this.inputMode || this.factoryPreview || this.run.state !== 'idle')) {
+      const progress = this.getPromptProgress();
+      const bar = progressBar(progress, this.width < 100 ? 8 : 12, { now: this.now, reducedMotion: this.reducedMotion });
+      const controls = !this.inputMode ? 'q quit' : this.run.state === 'running' ? 'Esc abort · /log logs' : this.completionOverview ? '/overview · /log logs' : 'Enter run · /log logs';
+      const brand = this.factoryPreview ? 'Factory preview · ' : this.width >= 100 ? 'theFactory · ' : '';
+      compactPrefix = `${brand}${bar} ${progress.label} · ${controls}`;
+    }
+    this.canvas.write(this.layout.statusRow, 1, truncate(compactPrefix, rightCol - 2), statusColor);
+    this.canvas.write(this.layout.statusRow, rightCol, right, T.textSecondary);
     if (this.inputMode) this._drawInput();
   }
 
@@ -1036,29 +1226,33 @@ export class App {
     const runtime = this.agentRuntime.get(key) ?? {};
     const settings = this.configView.info;
     const model = runtime.model ?? settings.agentModels?.[key] ?? settings.model ?? '(OpenCode default)';
-    const state = key === 'orchestrator' ? this.run.state : this.agents.get(key)?.status ?? 'idle';
+    const agent = this.agents.get(key);
+    const state = key === 'orchestrator' ? this.run.state : agent?.workerState === 'failed' ? 'failed' : agent?.status ?? 'idle';
     const session = runtime.sessionID ?? this.sessionID ?? this.run.sessionID;
     // Clear the overlay so the underlying frame does not bleed through.
     this.canvas.fill(row, col, boxWidth, boxHeight, ' ', 0);
-    this.canvas.box(row, col, boxWidth, boxHeight, key === 'orchestrator' ? ORCHESTRATOR.color : this.agents.get(key)?.def.color ?? T.border, `LOG: ${label}`);
+    const overview = Boolean(this.logView.overview);
+    this.canvas.box(row, col, boxWidth, boxHeight, key === 'orchestrator' ? ORCHESTRATOR.color : this.agents.get(key)?.def.color ?? T.border, `${overview ? 'OVERVIEW' : 'LOG'}: ${label}`);
     this.canvas.write(
       row + 1,
       col + 2,
-      truncate(`${entries.length} entries · ${this.logView.filter.toUpperCase()} · ${liveMarker} · ${state}`, boxWidth - 4),
+      truncate(overview ? `${progressBar(this.getPromptProgress(), 8)} ${this.getPromptProgress().label} · ${state}` : `${entries.length} entries · ${this.logView.filter.toUpperCase()} · ${liveMarker} · ${state}`, boxWidth - 4),
       T.textSecondary,
     );
-    this.canvas.write(row + 2, col + 2, truncate(`model ${model}`, boxWidth - 4), T.info);
-    this.canvas.write(row + 3, col + 2, truncate(session ? `session ${session}` : 'Session starts with the next task', boxWidth - 4), T.textSecondary);
-    const visibleRows = Math.max(1, boxHeight - 6);
+    if (!overview) {
+      this.canvas.write(row + 2, col + 2, truncate(`model ${model}`, boxWidth - 4), T.info);
+      this.canvas.write(row + 3, col + 2, truncate(session ? `session ${session}` : 'Session starts with the next task', boxWidth - 4), T.textSecondary);
+    }
+    const visibleRows = Math.max(1, boxHeight - (overview ? 4 : 6));
     const lines = this._logRows(visibleRows);
     lines.forEach((line, index) => {
       let cursor = col + 2;
-      for (const segment of line.segments) cursor = this.canvas.write(row + 4 + index, cursor, segment.text, segment.style);
+      for (const segment of line.segments) cursor = this.canvas.write(row + (overview ? 2 : 4) + index, cursor, segment.text, segment.style);
     });
     if (lines.length === 0) {
       this.canvas.write(row + 4, col + 2, truncate(`No ${this.logView.filter === 'all' ? 'events yet. Run a task to see activity.' : `${this.logView.filter}. Press f to change the filter.`}`, boxWidth - 4), T.textSecondary);
     }
-    const help = this.width >= 100
+    const help = overview ? '↑/↓ scroll · PgUp/Dn · g/G top/end · Esc close' : this.width >= 100
       ? '←/→ agent · ↑/↓ scroll · PgUp/Dn · f filter · g/G top/latest · space pause · esc close'
       : '←/→ agent  ↑/↓ scroll  f filter  G latest  esc close';
     this.canvas.write(row + boxHeight - 2, col + 2, truncate(help, boxWidth - 4), T.textSecondary);
@@ -1264,24 +1458,62 @@ export class App {
 
   /** Paint a compact session id/title header at the very top of the frame. */
   _drawSessionHeader() {
-    if (!this.sessionID) return;
+    if (!this.sessionID || this.layout.sky.rows < 1) return;
     const title = this.sessionTitle ? ` · ${this.sessionTitle}` : '';
     const text = `session: ${this.sessionID}${title}`;
     // Keep clear of the ACTIVE AGENTS panel (left) and GO usage panel (right).
-    const leftPad = 22;
-    const rightPad = 26;
-    const maxWidth = Math.max(20, this.width - leftPad - rightPad);
-    const shown = truncate(text, maxWidth);
+    const hasPanels = this.width >= 120 && this.layout.sky.rows >= 4;
+    const leftPad = hasPanels ? 22 : 1;
+    const rightPad = hasPanels ? 26 : 1;
+    const factory = factoryGeometry(this);
+    const artLeft = factory?.tiny ? Math.floor((this.width - 16) / 2) : factory?.col;
+    const artRight = factory?.tiny ? artLeft + 16 : factory?.signCol + 31;
+    const spans = [[leftPad, artLeft - 1], [artRight + 1, this.width - rightPad]];
+    const [start, end] = spans.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];
+    const maxWidth = Math.max(0, end - start);
+    if (maxWidth < 8) return;
+    const shown = truncate(maxWidth < 32 ? `session ${this.sessionID.slice(0, 12)}` : text, maxWidth);
     if (!shown) return;
-    const col = Math.max(leftPad, Math.floor((this.width - shown.length) / 2));
+    const col = start;
     // Clear the strip behind the text so the skyline doesn't bleed through.
     this.canvas.fill(0, col, shown.length, 1, ' ', 0);
     this.canvas.write(0, col, shown, T.textSecondary);
   }
+
+  _workerDesign(slot) {
+    return this.workerPreview ? WORKER_DESIGNS[['top', 'middle', 'bottom'].indexOf(slot?.band)] ?? 'dumpling' : 'dumpling';
+  }
+
+  _drawWorkers() {
+    const paint = (area, state, key, color, design = 'dumpling') => {
+      if (!area) return;
+      this.canvas.fill(area.row, area.col, area.width, area.height);
+      const elapsed = this.now - state.workerSince;
+      drawWorker(this.canvas, area, { key, color, design, state: state.workerState, elapsed: this.workerPreview && state.workerState === 'completed' ? elapsed % 1800 : elapsed, reducedMotion: this.reducedMotion });
+    };
+    paint(this.layout.centerWorker, this.orchestratorWorker, 'orchestrator', ORCHESTRATOR.color);
+    for (const [key, state] of this.agents) {
+      if (key === 'other' && !this.showOther) continue;
+      const slot = this._slots.get(key);
+      if (slot) paint(slot.worker, state, key, state.def.color, this._workerDesign(slot));
+    }
+  }
   /** Paint the current state into the back buffer. */
   draw() {
-    if (this.layout.tooSmall) return;
     this.canvas.clear();
+    if (this.layout.tooSmall) {
+      this.canvas.write(0, 0, truncate('Terminal too small', this.width), T.warning);
+      if (this.height > 1) this.canvas.write(1, 0, truncate(`Resize to 60×24 · now ${this.width}×${this.height}`, this.width), T.textPrimary);
+      if (this.height > 2) this.canvas.write(2, 0, truncate(this.run.state === 'running' ? 'Task continues · Ctrl-C quits' : 'Ctrl-C quits', this.width), T.textSecondary);
+      return;
+    }
+    if (this.logView.open || this.configView.open || this.imageView.open || this.questionView.open) {
+      this._drawLog();
+      this._drawConfig();
+      this._drawImage();
+      this._drawQuestion();
+      return;
+    }
     // theFactory skyline: baked first so overlays cover it; animated whenever
     // agents are working (src hook -> workin_on/factory.js).
     drawFactory(this);
@@ -1291,6 +1523,8 @@ export class App {
     this._drawSessionHeader();
     this._drawCenter();
     this._drawAgents();
+    this._drawWorkers();
+    this._drawPorts();
     this._drawPackets();
     this._drawStatus();
     this._drawLog();

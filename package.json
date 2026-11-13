@@ -18,6 +18,8 @@
   "files": [
     "bin",
     "src",
+    "skills",
+    "config",
     "sounds",
     "vendor",
     "README.md"

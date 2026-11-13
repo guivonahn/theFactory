@@ -6,7 +6,7 @@ import { App } from '../src/app.js';
 
 /** Iterate a few representative sizes without touching UI elements. */
 function spotApp(width, height) {
-  return new App({ width, height, color: false, inputMode: true });
+  return new App({ width, height, color: false, inputMode: true, reducedMotion: false });
 }
 
 test('sky region is reserved and the top agent band shifts down by it', () => {
@@ -25,7 +25,7 @@ test('sky region is reserved and the top agent band shifts down by it', () => {
 });
 
 test('factory is busy only while a run, workers, or packets are active', () => {
-  const app = spotApp(90, 28);
+  const app = spotApp(90, 42);
   assert.equal(isFactoryBusy(app), false);
 
   app.startRun({});
@@ -47,7 +47,7 @@ test('factory is busy only while a run, workers, or packets are active', () => {
 });
 
 test('smoke appears while busy and drains after the cooldown, never before', () => {
-  const app = spotApp(90, 28);
+  const app = spotApp(90, 42);
   app.applyEvent({ kind: 'msg', dir: 'out', to: 'developer', text: 'work' });
 
   const skyText = () =>
@@ -57,6 +57,7 @@ test('smoke appears while busy and drains after the cooldown, never before', () 
 
   app.advance(5000); // past COOLDOWN_MS = 1600 and out of packet lifetimes
   app.run.state = 'idle';
+  app.setAgentStatus('developer', 'idle');
   app.parallel.counts = { queued: 0, running: 0 };
   assert.equal(isFactoryBusy(app), false);
   assert.notEqual(skyText(), whileBusy, 'smoke leaves the sky after cooldown');
@@ -73,28 +74,18 @@ test('the silhouette and sign stay inside the sky slice at every spot size', () 
     const rows = app.snapshot().split('\n');
     const skyRows = app.layout.sky.rows;
     const sky = rows.slice(0, skyRows);
-    const bodyH = Math.min(4, skyRows);
-    // Chimney stack pokes one row above the roof only when sky allows.
-    const firstArtRow = skyRows - bodyH - (skyRows - bodyH >= 2 ? 1 : 0);
-    assert.ok(sky.some((line) => line.includes('┌▓▓')), `${w}x${h}: sane building`);
-    assert.ok(sky.some((line) => line.includes('the')), `${w}x${h}: wordmark`);
-    if (w >= 73) {
-      assert.ok(sky.some((line) => line.includes('██████')), `${w}x${h}: big sign letters`);
-    } else {
-      assert.ok(sky.some((line) => line.includes('theFactory')), `${w}x${h}: text fallback`);
+    if (skyRows < 3) {
+      if (skyRows > 0) assert.ok(sky.some((line) => line.includes('theFactory')), 'short header keeps the compact brand');
+      continue;
     }
+    assert.ok(sky.some((line) => line.includes('┌──┐')), `${w}x${h}: industrial factory roof`);
+    assert.ok(sky.some((line) => line.includes('the')), `${w}x${h}: wordmark`);
+    assert.ok(sky.some((line) => line.includes('█▀▀')), `${w}x${h}: compact pixel lettering`);
     for (let row = skyRows; row < rows.length; row += 1) {
       const line = rows[row];
       assert.ok(
-        !line.includes('▐█') && !line.includes('██'),
+        !line.includes('█▀▀') && !line.includes('┌──┐'),
         `${w}x${h}: nothing painted below the sky (row ${row}): ${JSON.stringify(line)}`,
-      );
-    }
-    // Art (stack included) may never enter the smoke rows above it.
-    for (let row = 0; row < firstArtRow; row += 1) {
-      assert.ok(
-        !rows[row].includes('▐█▌'),
-        `${w}x${h}: building glyph leaked above the roof (row ${row}): ${JSON.stringify(rows[row])}`,
       );
     }
   }

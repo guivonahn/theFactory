@@ -125,6 +125,7 @@ export function buildLayout(width, height, options = {}) {
   }
 
   const footerRows = Math.max(1, Math.min(3, options.footerRows ?? 1));
+  if (options.workers) return workerLayout(width, height, footerRows);
   const skyRows = skyRowsFor(height);
   const centerRow = Math.floor(height / 2);
   const topRow = 1 + skyRows;
@@ -212,4 +213,88 @@ export function buildLayout(width, height, options = {}) {
     other,
     agentOrder: AGENT_ORDER,
   };
+}
+
+/** Reserve a real creature footprint above every label, even at 60x24. */
+function workerLayout(width, height, footerRows) {
+  const available = height - footerRows;
+  const workerHeight = available >= 27 ? 6 : 5;
+  const reservedSky = available >= 39 ? 6 : 4;
+  const boxHeight = Math.max(2, Math.min(10, Math.floor((available - 3 * workerHeight - reservedSky) / 3)));
+  const groupHeight = workerHeight + boxHeight;
+  const skyRows = Math.min(7, available - 3 * groupHeight);
+  const top = skyRows;
+  const gap = Math.floor((available - top - 3 * groupHeight) / 2);
+  const centerWidth = Math.min(44, Math.max(20, width - 2 * (Math.round(width * 0.39) + 5)));
+  const boxWidth = Math.max(16, Math.min(40, Math.round(width * 0.39), Math.floor((width - centerWidth) / 2) - 4));
+  const bandRows = Object.fromEntries(['top', 'middle', 'bottom'].map((band, index) => [band, top + index * (groupHeight + gap) + workerHeight]));
+  const centerHeight = Math.min(7, boxHeight + 2);
+  const center = {
+    row: top + Math.floor((2 * groupHeight - workerHeight - centerHeight) / 2) + workerHeight,
+    col: Math.floor((width - centerWidth) / 2), width: centerWidth, height: centerHeight,
+  };
+  center.midRow = center.row + Math.floor(center.height / 2);
+  center.midCol = center.col + Math.floor(center.width / 2);
+  const workerArea = (box) => ({ row: box.row - workerHeight, col: box.col, width: box.width, height: workerHeight });
+  const agents = SLOT_SPECS.map((spec) => {
+    const box = agentSlotBox(spec.side, spec.band, width, boxWidth, boxHeight, bandRows);
+    const left = spec.side === 'left';
+    const sourceCol = left ? center.col : center.col + center.width - 1;
+    const targetCol = left ? box.col + box.width - 1 : box.col;
+    const gutter = left ? center.col - 2 : center.col + center.width;
+    const returnGutter = left ? center.col - 1 : center.col + center.width + 1;
+    const targetRow = box.row + Math.floor((box.height - 1) / 2);
+    const route = (start, end, via) => joinPath(
+      orthogonalPath(start, { row: start.row, col: via }),
+      orthogonalPath({ row: start.row, col: via }, { row: end.row, col: via }, 'vertical'),
+      orthogonalPath({ row: end.row, col: via }, end),
+    );
+    const path = route({ row: center.row + 1, col: sourceCol }, { row: targetRow, col: targetCol }, gutter);
+    const returnPath = route({ row: center.row + center.height - 2, col: sourceCol }, { row: targetRow + 1, col: targetCol }, returnGutter);
+    return { ...spec, label: agentByKey(spec.key).label, box, worker: workerArea(box), path, returnPath };
+  });
+  // Auxiliary agents stay in the center lane below the orchestrator.
+  const otherBox = { row: bandRows.bottom, col: center.col, width: center.width, height: boxHeight };
+  const otherRoute = (offset, gutter) => joinPath(
+    orthogonalPath({ row: center.row + center.height - 1, col: center.midCol + offset }, { row: center.row + center.height + offset, col: center.midCol + offset }, 'vertical'),
+    orthogonalPath({ row: center.row + center.height + offset, col: center.midCol + offset }, { row: center.row + center.height + offset, col: gutter }),
+    orthogonalPath({ row: center.row + center.height + offset, col: gutter }, { row: otherBox.row + offset, col: gutter }, 'vertical'),
+    orthogonalPath({ row: otherBox.row + offset, col: gutter }, { row: otherBox.row + offset, col: otherBox.col }),
+  );
+  const otherPath = otherRoute(0, center.col - 2);
+  return {
+    tooSmall: false, width, height, footerRows, center, centerRow: center.midRow,
+    centerWorker: workerArea(center), compact: boxHeight < 5,
+    sky: { rows: skyRows }, statusRow: height - footerRows,
+    inputRow: footerRows >= 2 ? height - 1 : null,
+    inputRows: footerRows >= 3 ? [height - 2, height - 1] : footerRows >= 2 ? [height - 1] : [],
+    agents, agentOrder: AGENT_ORDER,
+    other: { key: 'other', label: 'OTHER', side: 'center', band: 'bottom', box: otherBox, worker: workerArea(otherBox), path: otherPath, returnPath: otherRoute(1, center.col - 1) },
+  };
+}
+
+function joinPath(...parts) {
+  return parts.flatMap((part, index) => index ? part.slice(1) : part);
+}
+
+/** Merge the physical lane topology, preserving corners and shared junctions. */
+export function trackCellsFor(slots) {
+  const cells = new Map();
+  const add = (cell, direction) => {
+    const key = `${cell.row}:${cell.col}`;
+    const current = cells.get(key) ?? { ...cell, mask: 0 };
+    current.mask |= direction;
+    cells.set(key, current);
+  };
+  for (const slot of slots) for (const path of [slot.path, slot.returnPath]) {
+    for (let index = 1; index < path.length; index++) {
+      const a = path[index - 1], b = path[index];
+      if (b.row < a.row) { add(a, 1); add(b, 4); }
+      else if (b.row > a.row) { add(a, 4); add(b, 1); }
+      else if (b.col > a.col) { add(a, 2); add(b, 8); }
+      else if (b.col < a.col) { add(a, 8); add(b, 2); }
+    }
+  }
+  const glyphs = { 1: '│', 2: '─', 3: '╰', 4: '│', 5: '│', 6: '╭', 7: '├', 8: '─', 9: '╯', 10: '─', 11: '┴', 12: '╮', 13: '┤', 14: '┬', 15: '┼' };
+  return [...cells.values()].map((cell) => ({ ...cell, glyph: glyphs[cell.mask] }));
 }

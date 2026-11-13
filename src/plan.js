@@ -30,16 +30,21 @@ export function buildPlanningPrompt(objective, { maxTasks = 6, sequential = fals
     'Respond with ONLY a JSON object — no prose, no code fences — in exactly this shape:',
     '{"tasks":[{"id":"t1","title":"short title","agent":"explorer","deps":[],"files":["src/x.js"],"readOnly":true,"acceptance":"how to verify"}]}',
     'Rules:',
-    `- At most ${limit} task${limit === 1 ? '' : 's'}; drop a category only when pointless.`,
+    `- At most ${limit} task${limit === 1 ? '' : 's'}. This is a ceiling, not a target; one task is valid. Choose the smallest useful plan, not one task per agent/category.`,
     '- ids are t1, t2, ... unique. deps list earlier ids only (keep it a DAG).',
-    '- Two tasks without a dependency path between them MUST NOT share a file in "files".',
+    '- Independent readers may share files. A writer and any reader/writer of the same files need a dependency when one consumes the other\'s changes. File/directory scopes are locked during execution.',
     '- Creating or editing files: agent "developer", readOnly false, files = repo-relative paths touched.',
     '- Reading/research/review: readOnly true (explorer, architect, reviewer, security).',
-    '- Running/fixing tests: agent "tester", readOnly true.',
+    '- Running tests: agent "tester", readOnly true. Writing/fixing tests: agent "developer", readOnly false.',
+    '- Every developer task must list concrete file/directory scopes. An unknown scope serializes the task against other work.',
+    '- Each task needs an observable acceptance criterion and a self-contained handoff; dependent tasks receive prior outputs.',
+    '- A question asking how a project works is an inspection, not an implementation or audit request. Prefer one explorer; split only genuinely independent areas when useful. Do not add test execution or file edits unless needed to answer the objective.',
+    '- File paths are search hints unless the objective explicitly requires an artifact. Do not assume README.md, graph outputs or particular directories exist. Finding an optional file absent is a valid observation, not failed acceptance.',
+    '- Add a dependency only when a task cannot proceed without the producer\'s output or changes. Separate readers with already specified file scopes can inspect concurrently; do not gate all research on a preliminary map.',
     sequential
       ? '- Tasks execute strictly one after another (sequential mode); lean on deps for ordering.'
       : '- Independent tasks run in parallel; deps decide the order.',
-    '- Finish with one task that verifies or summarizes the whole objective and depends on its inputs.',
+    '- The runtime already generates the final orchestrator overview from every outcome, including partial work. Do not add a summary-only task or gate that overview on all tasks succeeding. Include necessary verification for implementation work.',
     skills ? skillsPrompt(skills) : '',
     '',
     `Objective: ${goal}`,
@@ -98,9 +103,12 @@ export function parsePlan(text) {
     throw new Error(`planner JSON invalid: ${error?.message ?? error}`);
   }
   const raw = Array.isArray(parsed?.tasks) ? parsed.tasks : Array.isArray(parsed) ? parsed : [];
+  if (!raw.length) throw new Error('planner returned no tasks');
   for (const task of raw) {
-    if (!PLANNER_AGENTS.includes(task?.agent)) task.agent = 'developer';
-    if (typeof task?.readOnly !== 'boolean') task.readOnly = task.readOnly !== false;
+    if (!task || typeof task !== 'object' || Array.isArray(task)) throw new Error('each planner task must be an object');
+    if (!PLANNER_AGENTS.includes(task.agent)) task.agent = 'developer';
+    if (task.agent !== 'developer' && task.readOnly === false) throw new Error(`${task.agent} is read-only; assign file edits to developer`);
+    if (typeof task.readOnly !== 'boolean') task.readOnly = task.agent !== 'developer';
   }
   return validateTasks(raw);
 }

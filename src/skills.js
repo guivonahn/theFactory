@@ -26,10 +26,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Default skills directory, overridable via FACTORY_SKILLS_DIR. */
-export function defaultSkillsDir() {
-  return process.env.FACTORY_SKILLS_DIR ?? path.join(process.cwd(), 'skills');
+export function defaultSkillsDir(projectDir = process.cwd()) {
+  return process.env.FACTORY_SKILLS_DIR ?? path.join(projectDir, 'skills');
 }
 
 /** Parse a subset of YAML frontmatter: scalars and inline/block arrays. */
@@ -118,11 +119,17 @@ export function loadSkill(file) {
 }
 
 /** Load all `.md` skill files from a directory. Returns [] if missing. */
-export function loadSkills(dir = defaultSkillsDir()) {
+export function loadSkills(dir, { projectDir = process.cwd() } = {}) {
+  if (dir === undefined) {
+    const bundledDir = fileURLToPath(new URL('../skills/', import.meta.url));
+    const bundled = loadSkills(bundledDir);
+    const local = loadSkills(defaultSkillsDir(projectDir));
+    return [...new Map([...bundled, ...local].map((skill) => [skill.name, skill])).values()];
+  }
   if (!fs.existsSync(dir)) return [];
   const files = fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith('.md'))
+    .filter((f) => f.endsWith('.md') && f.toLowerCase() !== 'readme.md')
     .sort()
     .map((f) => path.join(dir, f));
   const skills = [];
@@ -153,12 +160,13 @@ export function createSkillRegistry(skills = []) {
     }
   }
 
-  function find(text) {
-    const words = new Set(String(text ?? '').toLowerCase().split(/\W+/).filter(Boolean));
+  function find(text, { agent } = {}) {
+    const normalize = (value) => String(value).toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const normalized = ` ${normalize(text ?? '')} `;
     const matches = new Set();
-    for (const word of words) {
-      const set = triggerIndex.get(word);
-      if (set) for (const name of set) matches.add(name);
+    for (const [trigger, names] of triggerIndex) {
+      if (!normalize(trigger) || !normalized.includes(` ${normalize(trigger)} `)) continue;
+      for (const name of names) if (!agent || byName.get(name)?.agent === agent) matches.add(name);
     }
     return [...matches].map((name) => byName.get(name));
   }

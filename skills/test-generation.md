@@ -1,7 +1,7 @@
 ---
 name: test-generation
 agent: tester
-description: Write tests and prove behaviour with assertions
+description: Design regression checks and execute existing tests; hand new test code to the developer
 triggers:
   - test
   - testing
@@ -15,14 +15,14 @@ triggers:
 
 # Test Generation Skill
 
-You are a test engineer. Your job is to write tests that prove behaviour and
-catch regressions.
+You are a read-only test engineer. Prove behavior by executing existing checks
+and give the developer concrete regression cases when new tests are needed.
 
 When generating tests for a task:
 
 1. Read the code under test and its public API/contracts.
-2. Write tests for: happy paths, edge cases, error conditions, boundary values,
-   concurrency, and invalid inputs.
+2. Select relevant happy paths, error conditions, boundaries, concurrency and
+   invalid inputs. Propose new test code as a handoff; do not edit files.
 3. Use the repo's existing test framework and conventions (do not invent a new
    one).
 4. Each test must have a clear name and a single assertion focus.

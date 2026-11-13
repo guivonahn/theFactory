@@ -34,46 +34,130 @@ thefactory
 
 ## Screenshots
 
-```
-
-
-                                   ▐█▌
-        ┌▓▓▓┐‾/\‾/\‾/\‾/\‾/\‾/\‾/\‾▐█▌      ██████ ░████░ ░█████ ██████ ░████░ ██████ ██░░██
-        │▓▓▓│░░▪░░░░▪░░░░▪░░░░▪░░░░▐█▌  the ██░░░░ ██░░██ ██░░░░ ░░██░░ ██░░██ ██░░██ ░░██░░
-        │▓▓▓│░░░░░░░░░░░░░░░░░░░░░░▐█▌      █████░ ██████ ██░░░░ ░░██░░ ██░░██ █████░ ░░██░░
-        └▓▓▓┘▪▪░▪▪░▪▪░▪▪░▪▪░▪▪░▪▪░░▐█▌      ██░░░░ ██░░██ ░█████ ░░██░░ ░████░ ██░░▟█ ░░██░░
-
-  ┌──────────── EXPLORER ────────────✓┐                      ┌──────────── ARCHITECT ───────────◐┐
-  │ » Explore the auth surface: rout… │                      │ » Map module boundaries and the … │
-  │ « Found 3 relevant files: src/au… │──────++       ++─────│ « Proposed AuthService + Session… │
-  │ msg:2 tool:2                      │      ││       ││     │ msg:3 tool:1                      │
-  └───────────────────────────────────┘      ││       ││     └───────────────────────────────────┘
-                                        ┌── ORCHESTRATOR ──┐
-                                        │ › ← architect:   │
-                                        │ Wrap-up:         │
-                                       ││                  ││
-  ┌──────────── DEVELOPER ───────────✓┐││ msgs 19 · tools… ││┌──────────── REVIEWER ────────────✓┐
-  │ » Implement AuthService with a S… │││ ◐ 1/6 agents wo… │││ » Review the diff for regression… │
-  │ « Wrote src/auth.js and src/sess… ││└──────────────────┘││ « 2 nits: guard refresh, rename … │
-  │ msg:4 tool:5                      ││││                ││││ msg:4 tool:1                      │
-  └───────────────────────────────────┘ ││                ││ └───────────────────────────────────┘
-                                        ││                ││
-                                        ││                ││
-                                        ││                ││
-                                        ││                ││
-  ┌──────────── SECURITY ────────────✓┐ ││                ││ ┌───────────── TESTER ─────────────✓┐
-  │ » Audit token storage, SQL param… │ ││                ││ │ » Run the auth and session suite… │
-  │ « No injection paths. Rotate the… │──+                +──│ « 18 pass, 1 fail: the refresh p… │
-  │ msg:2 tool:1                      │                      │ msg:4 tool:2                      │
-  └───────────────────────────────────┘                      └───────────────────────────────────┘
- theFactory · demo · 19 msgs · 0 packet(s) · q quit                                          100×32
-```
+![The miniature factory and its parallel crew](docs/factory-preview.gif)
 
 - **Task** — type a task, press Enter, watch OpenCode work and the six pillars
   light up. This is the default in a terminal.
 - **Demo** — a deterministic scripted workflow for trying the UI.
 - **Live** — replay or follow an existing OpenCode session.
 - **Snapshot** — plain-text frames for pipes and logs.
+
+## Tiny factory crew
+
+Each agent, including the orchestrator and auxiliary agents, has a chunky,
+square little worker with a hard hat directly above its name. Six-pose animations
+show tinkering/typing, thinking, breathing, a celebratory jump, or a confused
+face on failure. Each worker has a name and a signature prop:
+
+| Role | Name | Prop |
+| --- | --- | --- |
+| Orchestrator | orca | Tiny trumpet |
+| Explorer | xp | Four-color Windows XP flag |
+| Developer | denver | Keyboard with keys and a spacebar |
+| Security | firewall | Staggered brick wall and flames |
+| Architect | mosby | Building with windows and a door |
+| Reviewer | four eyes | Square glasses |
+| Tester | qually | Spreadsheet grid |
+
+```sh
+node bin/theFactory.js --worker-preview       # animated dumpling / bean / puff audition
+node bin/theFactory.js --demo                 # selected dumplings in a demo session
+node bin/theFactory.js --reduced-motion       # static expressive poses
+```
+
+The broad **square dumpling** is the selected design; the taller bean and
+soot puff remain in the audition. [Selected crew](docs/worker-preview.gif)
+and [three-design audition](docs/worker-audition.gif) are animated previews
+rendered from the TUI canvas. Glyph appearance depends on the terminal font.
+
+Workers occupy 16×5–6 cells; Denver, Firewall and Mosby expand to 22 cells when
+their card has room for larger props. They share the existing render clock with independent
+phases. Completion plays once and settles. No dependencies or per-worker timers
+are added; the existing ANSI diff renderer updates changed cells. `NO_COLOR`
+retains the shapes and expressions. Set `FACTORY_REDUCED_MOTION=1` or
+`REDUCE_MOTION=1` to disable decorative movement, or use `--reduced-motion`.
+`TERM=dumb` also selects reduced motion.
+
+At **60×24**, compact cards retain each worker, name, and status alongside the
+task composer. The skyline contracts when necessary; taller terminals restore
+the feeds and skyline. Full messages remain available in `/log` (or `l` in
+demo/live mode). With mouse reporting enabled, clicking a worker or compact
+card also opens its log. See the [60×24 frame](docs/worker-preview-60x24.txt).
+During a session, shrinking below the minimum shows a resize hint and keeps
+the task running. Growing the terminal restores the view and packet routes.
+The [TUI review](docs/TUI_REVIEW.md) records the frontend fixes and verification.
+
+## Fira Code in macOS Terminal
+
+Fira Code is selected by Terminal for the entire profile, including the TUI,
+logs, prompt and configuration screens. Use the included
+[theFactory Fira Code profile](config/terminal/theFactory-FiraCode.terminal):
+
+1. Install the TTF fonts from the [official Fira Code release](https://github.com/tonsky/FiraCode/releases/tag/6.2) in Font Book if needed.
+2. In Terminal, open **Settings → Profiles**, use the profile action menu to
+   **Import**, and select `config/terminal/theFactory-FiraCode.terminal`.
+3. Open a window with **Shell → New Window → theFactory — Fira Code** and run
+   `thefactory`. The profile uses Fira Code Regular 14 at 120×42.
+
+You can also select Fira Code directly under **Profiles → Text → Font → Change**
+for your existing profile. The TUI cannot change a terminal font through ANSI
+escapes. The supplied profile has no startup command and does not replace your
+default profile. Decorative crew glyphs are covered by Fira Code 6.2; arbitrary
+text from agents can still use macOS font fallback. Ligatures depend on terminal
+support. See [profile details](config/terminal/README.md).
+
+## Factory animation and parallel work
+
+The factory uses an industrial sawtooth roof, stack exhaust, uniform window
+bays and a production conveyor. Its angular wordmark has a restrained amber
+accent. The building has no face. Motion follows real activity and respects
+reduced motion; small headers use a compact factory mark.
+
+The chimney emits visible rising puffs. Session labels reserve space around
+the artwork so they cannot erase the smoke. At 60×24 with the task composer,
+the crew and controls use the available rows; a taller window restores the skyline.
+
+```sh
+node bin/theFactory.js --factory-preview              # local animated preview
+node bin/theFactory.js --task --parallel --workers 3   # plan and run independent work
+```
+
+Parallel mode honors task dependencies and declared file ownership. Independent
+readers and disjoint writers overlap; conflicting read/write scopes serialize.
+Workers share the target checkout, so file scopes are scheduling contracts rather
+than isolated workspaces. Failed dependencies block their consumers, successful
+outputs reach downstream tasks, and Esc cancels running and queued work. Any
+failed/blocked task is reported as an incomplete run. The TUI shows concurrent
+workers per role and live scheduler counts.
+
+Investigation plans use the smallest useful team and only necessary dependencies;
+the runtime already supplies the final overview. Scope paths are search hints:
+a missing optional README or graph is a finding. If a read-only investigator
+reports incomplete despite a successful process, the orchestrator can reassess
+the supplied findings against that task's acceptance criterion once, without
+tools. Approval requires supporting report lines; unavailable, invalid or negative
+reviews retain the failure. Implementation/test failures remain blocking. The
+original declaration, review and limitations are retained in saved state and
+passed to dependent tasks and the overview.
+
+The footer shows prompt progress from completed plan steps, including the final
+overview. Parallel runs use the accepted task graph; native runs use OpenCode's
+todo list when supplied. A run without a known step total shows an indeterminate
+bar. Failed, blocked or cancelled work never produces a successful 100% result.
+
+The orchestrator finishes with a scrollable overview of **Completed**, **Not
+finished**, and **Verification**. Parallel runs add a text-only orchestrator
+recap using every task outcome; the complete task record is retained if recap
+generation fails. Cancelled runs show their recorded outcomes without starting
+a recap request. The view opens automatically; Esc closes it and `/overview`
+reopens it. Full worker output remains in `/log`.
+See the [overview preview](docs/overview-preview.png).
+
+Built-in [agent skills](skills/README.md) load from any target repository.
+Implementation, terminal-interface and parallel-execution skills extend the
+specialists' role contracts. Skill bodies go only to matching roles. Existing
+system instructions, models and permissions are preserved in per-process
+configuration; project skills can override built-ins by name.
 
 ## Task mode basics
 
@@ -87,7 +171,7 @@ thefactory
 Composer commands:
 
 ```
-/new  /sessions  /resume <id|#n>  /fallback  /models  /volume  /config  /log
+/new  /sessions  /resume <id|#n>  /fallback  /models  /volume  /config  /log  /overview
 ```
 
 `/config` opens an editable card for the model, profile, verbosity, fallbacks,

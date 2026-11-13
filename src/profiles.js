@@ -15,7 +15,7 @@ export const VARIANT_ORDER = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 // A free-only profile: every agent must run on an `opencode/*-free` model, so
 // no subscription (and no OC-NOLIMIT proxy) is required.
 export const FREE_AGENT_MODELS = {
-  orchestrator: 'opencode/crouton-alpha-free',
+  orchestrator: 'opencode/glm-5.3-flash-free',
   architect: 'opencode/deepseek-v4.1-flash-free',
   explorer: 'opencode/mimo-v2.6-flash-free',
   developer: 'opencode/flint-40b-free',
@@ -24,7 +24,7 @@ export const FREE_AGENT_MODELS = {
   tester: 'opencode/nemotron-3.5-lightning-free',
 };
 
-// Free-tier fallback pool: ALL free models from OpenCode (opencode provider
+// Free-tier fallback pool: available free models from OpenCode (opencode provider
 // and opencode-go provider). OC-NOLIMIT proxy models are intentionally
 // excluded — they require the Bun-based proxy and are not part of the default
 // fallback. When auto-fallback is on (free profile), retries cycle through
@@ -33,7 +33,6 @@ export const FREE_AGENT_MODELS = {
 export const FREE_FALLBACK_MODELS = [
   // opencode provider (no proxy needed)
   'opencode/beam-free',
-  'opencode/crouton-alpha-free',
   'opencode/deepseek-v4.1-flash-free',
   'opencode/flint-40b-free',
   'opencode/glm-5.3-flash-free',
@@ -43,11 +42,10 @@ export const FREE_FALLBACK_MODELS = [
   'opencode/nemotron-3.5-super-vl-free',
   // opencode-go provider (free tier of Go)
   'opencode-go/beam-free',
-  'opencode-go/crouton-alpha-free',
   'opencode-go/iceman-contributor-free',
 ];
 
-const DEFAULT_FREE_MODEL = 'opencode/crouton-alpha-free';
+const DEFAULT_FREE_MODEL = FREE_AGENT_MODELS.orchestrator;
 
 // Declared OpenCode Go variants. Unknown models deliberately have no entry so
 // profile changes strip old suffixes and leave their base model id untouched.

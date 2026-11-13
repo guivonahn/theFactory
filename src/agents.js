@@ -9,6 +9,7 @@ import { AGENT_COLORS } from './colors.js';
 export const ORCHESTRATOR = Object.freeze({
   key: 'orchestrator',
   label: 'ORCHESTRATOR',
+  name: 'orca',
   color: AGENT_COLORS.orchestrator,
   glyph: '◆',
   role: 'coordinator',
@@ -16,12 +17,12 @@ export const ORCHESTRATOR = Object.freeze({
 
 /** The six pillar agents, ordered as they appear around the orchestrator. */
 export const AGENTS = Object.freeze([
-  Object.freeze({ key: 'explorer', label: 'EXPLORER', color: AGENT_COLORS.explorer, glyph: '◇', role: 'maps the terrain' }),
-  Object.freeze({ key: 'architect', label: 'ARCHITECT', color: AGENT_COLORS.architect, glyph: '▦', role: 'designs the shape' }),
-  Object.freeze({ key: 'developer', label: 'DEVELOPER', color: AGENT_COLORS.developer, glyph: '▶', role: 'writes the code' }),
-  Object.freeze({ key: 'reviewer', label: 'REVIEWER', color: AGENT_COLORS.reviewer, glyph: '◉', role: 'challenges the diff' }),
-  Object.freeze({ key: 'security', label: 'SECURITY', color: AGENT_COLORS.security, glyph: '!', role: 'hunts for risk' }),
-  Object.freeze({ key: 'tester', label: 'TESTER', color: AGENT_COLORS.tester, glyph: '✓', role: 'proves the behaviour' }),
+  Object.freeze({ key: 'explorer', name: 'xp', label: 'EXPLORER', color: AGENT_COLORS.explorer, glyph: '◇', role: 'maps the terrain' }),
+  Object.freeze({ key: 'architect', name: 'mosby', label: 'ARCHITECT', color: AGENT_COLORS.architect, glyph: '▦', role: 'designs the shape' }),
+  Object.freeze({ key: 'developer', name: 'denver', label: 'DEVELOPER', color: AGENT_COLORS.developer, glyph: '▶', role: 'writes the code' }),
+  Object.freeze({ key: 'reviewer', name: 'four eyes', label: 'REVIEWER', color: AGENT_COLORS.reviewer, glyph: '◉', role: 'challenges the diff' }),
+  Object.freeze({ key: 'security', name: 'firewall', label: 'SECURITY', color: AGENT_COLORS.security, glyph: '!', role: 'hunts for risk' }),
+  Object.freeze({ key: 'tester', name: 'qually', label: 'TESTER', color: AGENT_COLORS.tester, glyph: '✓', role: 'proves the behaviour' }),
 ]);
 
 /** Fallback pillar for agents outside the six known roles (e.g. "build"). */

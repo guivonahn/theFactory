@@ -327,7 +327,7 @@ export class Canvas {
             chunks.push(this._styleCode(style));
             activeStyle = style;
           }
-          chunks.push(back.chars[row][col]);
+          if (back.chars[row][col] !== CONTINUATION) chunks.push(back.chars[row][col]);
           col += 1;
         }
       }
@@ -345,7 +345,7 @@ export class Canvas {
   toPlainText() {
     const buffer = this._buffers[this._back];
     return buffer.chars
-      .map((row) => row.join('').replace(/\s+$/u, ''))
+      .map((row) => row.filter((glyph) => glyph !== CONTINUATION).join('').replace(/\s+$/u, ''))
       .join('\n');
   }
 }

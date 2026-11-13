@@ -27,8 +27,8 @@ export function validateTasks(tasks) {
       agent: clean(task.agent) || 'orchestrator',
       deps,
       priority: Number.isFinite(task.priority) ? Number(task.priority) : 0,
-      readOnly: task.readOnly !== false,
-      files: Array.isArray(task.files) ? task.files.map(clean) : [],
+      readOnly: typeof task.readOnly === 'boolean' ? task.readOnly : clean(task.agent) !== 'developer',
+      files: Array.isArray(task.files) ? [...new Set(task.files.map(normalizeScope).filter(Boolean))] : [],
       acceptance: clean(task.acceptance),
       order: index,
     };
@@ -97,7 +97,8 @@ export function createScheduler(options = {}) {
       const depStates = task.deps.map((d) => tasksById.get(d)?.state);
       if (depStates.some((s) => s === 'failed' || s === 'blocked' || s === 'cancelled')) {
         task.state = 'blocked';
-        emit({ kind: 'blocked', taskId: task.id });
+        task.error = `Unsuccessful dependency: ${task.deps.filter((id) => ['failed', 'blocked', 'cancelled'].includes(tasksById.get(id)?.state)).join(', ')}`;
+        emit({ kind: 'blocked', taskId: task.id, error: task.error });
         refreshReady(); // propagate downstream deterministically
         return;
       }
@@ -115,9 +116,9 @@ export function createScheduler(options = {}) {
   }
 
   function nextReady() {
-    const running = [...tasksById.values()].filter((t) => t.state === 'running').length;
-    if (running >= effectiveConcurrency) return null;
-    return readyTasks()[0] ?? null;
+    const running = [...tasksById.values()].filter((t) => t.state === 'running');
+    if (running.length >= effectiveConcurrency) return null;
+    return readyTasks().find((task) => running.every((other) => !scopesConflict(task, other))) ?? null;
   }
 
   function dispatchNext() {
@@ -167,8 +168,17 @@ export function createScheduler(options = {}) {
     return task;
   }
 
+  function markCancelled(id) {
+    const task = tasksById.get(id);
+    if (!task || task.state !== 'running') throw new Error(`cannot cancel ${id}: not running`);
+    task.state = 'cancelled';
+    emit({ kind: 'cancelled', taskId: id });
+    refreshReady();
+    return task;
+  }
+
   function snapshot() {
-    return [...tasksById.values()].map((t) => ({ id: t.id, state: t.state, attempts: t.attempts }));
+    return [...tasksById.values()].map((t) => ({ id: t.id, state: t.state, attempts: t.attempts, ...(t.error ? { error: t.error } : {}) }));
   }
 
   function isDone() {
@@ -178,7 +188,7 @@ export function createScheduler(options = {}) {
 
   function onEvent(fn) { if (typeof fn === 'function') listeners.push(fn); return api; }
 
-  const api = { submit, dispatchNext, nextReady, readyTasks, markComplete, markFailed, cancel, snapshot, isDone, onEvent };
+  const api = { submit, dispatchNext, nextReady, readyTasks, markComplete, markFailed, markCancelled, cancel, snapshot, isDone, onEvent };
   return api;
 }
 
@@ -187,30 +197,39 @@ export function createScheduler(options = {}) {
  * Respects DAG order, honors concurrency, no duplicate dispatch.
  * Sequential option forces concurrency 1.
  */
-export async function runTasks({ tasks, executor, concurrency = 3, sequential = false, maxRetries = 0 } = {}) {
+export async function runTasks({ tasks, executor, concurrency = 3, sequential = false, maxRetries = 0, signal, onEvent } = {}) {
   if (typeof executor !== 'function') throw new Error('executor is required');
   const scheduler = createScheduler({ maxConcurrency: concurrency, maxRetries, sequential });
+  if (typeof onEvent === 'function') scheduler.onEvent((event) => onEvent(event, scheduler.snapshot()));
   scheduler.submit(tasks);
   const results = new Map();
   const inflight = new Set();
 
+  const cancelPending = () => {
+    for (const task of scheduler.snapshot()) if (task.state === 'pending' || task.state === 'ready') scheduler.cancel(task.id);
+  };
   let pump = () => {
+    if (signal?.aborted) { cancelPending(); return; }
     while (!scheduler.isDone() && inflight.size < (sequential ? 1 : concurrency)) {
       const next = scheduler.dispatchNext();
       if (!next) break;
-      const run = (async () => {
-        try {
-          const result = await executor(next);
-          results.set(next.id, result);
-          scheduler.markComplete(next.id, result);
-        } catch (error) {
-          scheduler.markFailed(next.id, error);
-          if (!results.has(next.id)) results.set(next.id, { error: String(error?.message ?? error ?? 'failed') });
-        } finally {
-          inflight.delete(run);
-          pump();
-        }
-      })();
+      // Queue execution after registration, including executors that throw synchronously.
+      const run = Promise.resolve().then(() => {
+        if (signal?.aborted) throw new Error('cancelled');
+        const dependencies = Object.fromEntries(next.deps.map((id) => [id, results.get(id)]));
+        return executor(next, { signal, dependencies });
+      }).then((result) => {
+        results.set(next.id, result);
+        if (signal?.aborted) scheduler.markCancelled(next.id);
+        else scheduler.markComplete(next.id, result);
+      }).catch((error) => {
+        if (signal?.aborted) scheduler.markCancelled(next.id);
+        else scheduler.markFailed(next.id, error);
+        if (!results.has(next.id)) results.set(next.id, { error: String(error?.message ?? error ?? 'failed') });
+      }).finally(() => {
+        inflight.delete(run);
+        pump();
+      });
       inflight.add(run);
     }
   };
@@ -221,10 +240,13 @@ export async function runTasks({ tasks, executor, concurrency = 3, sequential = 
       if (settled) return;
       if (scheduler.isDone() && inflight.size === 0) {
         settled = true;
+        signal?.removeEventListener('abort', onAbort);
         resolve({ results: Object.fromEntries(results), snapshot: scheduler.snapshot() });
       }
     };
     scheduler.onEvent(check);
+    const onAbort = () => { cancelPending(); check(); };
+    signal?.addEventListener('abort', onAbort, { once: true });
     // Wrap pump so every completion path re-checks after inflight shrinks.
     const origPump = pump;
     pump = () => { origPump(); check(); };
@@ -232,4 +254,26 @@ export async function runTasks({ tasks, executor, concurrency = 3, sequential = 
     // Cover the empty / all-sync case.
     check();
   });
+}
+
+function normalizeScope(value) {
+  const parts = clean(value).replace(/\\/g, '/').replace(/^\.\//, '').split('/');
+  const normalized = [];
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..') { if (normalized.length) normalized.pop(); else return '*'; }
+    else normalized.push(part);
+  }
+  return normalized.join('/') || '*';
+}
+
+/** Readers can overlap; writers acquire only their declared file/directory scopes. */
+export function scopesConflict(a, b) {
+  if (a.readOnly && b.readOnly) return false;
+  if (!a.files?.length || !b.files?.length) return true;
+  return a.files.some((left) => b.files.some((right) => {
+    const l = normalizeScope(left), r = normalizeScope(right);
+    if (/[?*\[]/.test(l) || /[?*\[]/.test(r)) return true;
+    return l === r || l.startsWith(`${r}/`) || r.startsWith(`${l}/`);
+  }));
 }

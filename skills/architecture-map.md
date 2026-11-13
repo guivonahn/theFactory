@@ -1,5 +1,7 @@
 ---
 name: architecture-map
+agent: architect
+triggers: [architecture, design, boundaries, dependency, dependencies, refactor]
 description: Inspect a real codebase and produce a verifiable ASCII architecture diagram on every Architect invocation; maintain the canonical, human-readable docs/architecture/ARCHITECTURE.md map without changing source code. Distinguish implemented from proposed components and keep evidence paths.
 license: MIT
 compatibility: opencode
@@ -17,7 +19,7 @@ Create a **source-grounded, terminal-readable, continuously maintained ASCII map
 
 `docs/architecture/ARCHITECTURE.md` (relative to the **target project's repository root**).
 
-The Architect MUST include a current-state ASCII diagram in **every architectural response**, even when the request is just a question, an option comparison, or a small design change. It MUST refresh the canonical artifact when the inspected implementation differs from the stored map. A skill is only loaded on demand: the Architect's permanent prompt must explicitly require `skill({ name: "architecture-map" })` for every invocation (see INSTALLATION.md).
+The Architect MUST include a current-state ASCII diagram in **every architectural response**, even when the request is just a question, an option comparison, or a small design change. It MUST refresh the canonical artifact when the inspected implementation differs from the stored map. theFactory injects these instructions for matching architectural work; no separate skill-loader call is needed.
 
 **Do not fabricate components, connections, entry points, or runtime behavior.** A clear `unknown / not verified` is more useful than a confident guess.
 
