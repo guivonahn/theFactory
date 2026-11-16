@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { resolveAgent } from './agents.js';
 import { imagesFromPart } from './media.js';
-import { coarenaModels, coarenaRunEnv, isCoarenaModel, usesCoarena } from './coarena.js';
+import { automaticFallbackModels, coarenaModels, coarenaRunEnv, isCoarenaModel, usesCoarena } from './coarena.js';
 import { agentModelsRunEnv, hasAgentModels, MODEL_AGENT_KEYS } from './agentModels.js';
 import { toolLogEntry } from './logFormat.js';
 import { agentPromptsRunEnv } from './agentPrompts.js';
@@ -487,7 +487,7 @@ export function launchRun(options = {}) {
  * variant) retries a different model too.
  */
 export function isTransientProviderError(text) {
-  return /provider\.quota|free usage limit|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
+  return /provider\.quota|usage[ _-]+limits?|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
 }
 
 /**
@@ -501,10 +501,8 @@ export async function launchRunWithFallback(options = {}) {
   options = { ...options, coarena: usesCoarena(options) };
   let models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
   if (options.autoFallback && options.coarena) {
-    const selected = options.model?.split('/')[1]?.split('#')[0];
     const available = coarenaModels({ ...process.env, ...options.env });
-    const ordered = [...available.filter((model) => model.split('/')[1] === selected), ...available.filter((model) => model.split('/')[1] !== selected)];
-    models = [...ordered, ...models];
+    models = automaticFallbackModels(options.model, available, models);
   }
   const pool = [options.model ?? null, ...models.filter(Boolean)];
   const unique = [];

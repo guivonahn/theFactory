@@ -49,7 +49,9 @@ requires a saved Custom. Explicit model flags update Custom as well.
 Profile changes refresh the displayed models and variants immediately. Changes
 apply on the next task through private OpenCode processes, including parallel
 workers. Fallbacks are temporary and never save their models over Custom. A
-Coarena model first tries its other key, then the remaining fallback pool.
+Coarena model rotates through keys in descending order, keeping the same model,
+then uses the remaining non-Coarena fallback pool. For example, Fable key 4 →
+key 3 → key 2 → key 1 → OpenCode Go. Higher unused slots are tried after key 1.
 With per-agent choices, a retry updates only the running agent's model.
 Coarena credentials make models available in the picker and fallback pool;
 they do not replace an explicitly selected preset's lineup.
@@ -66,11 +68,13 @@ while activity continues. Up to 500 entries per agent are retained. Tool
 content above 32,000 characters is visibly truncated. Usage totals appear only
 when OpenCode supplies them.
 
-When `.env` contains `COARENA_API_KEY_1` and/or `COARENA_API_KEY_2`, task mode
-prefers `coarena-1/claude-opus-5-5` (or key 2 if it is the only key). On a
-provider quota/rate-limit error it tries the other Opus credential, then
-`claude-fable-5-2` with each available credential, then the OpenCode Go pool
-below. Each task starts with Coarena again. The free profile excludes Coarena.
+When `.env` contains `COARENA_API_KEY_1` and/or `COARENA_API_KEY_2` (any
+number of keys is supported — continue the numbering with `_3`, `_4`, ...),
+task mode prefers `coarena-1/claude-opus-5-5` (or the next available key if
+lower slots are unset). On a
+provider quota/rate-limit error it keeps the selected model and rotates keys
+downward, wrapping to higher unused slots before the OpenCode Go pool below.
+Each task starts with its selected model again. The free profile excludes Coarena.
 Exports override `.env`, and duplicate credentials are tried only once per
 model. No key is written into the OpenCode configuration.
 

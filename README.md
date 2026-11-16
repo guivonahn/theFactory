@@ -212,10 +212,11 @@ output volume is left untouched. Snapshot frames stay silent.
 
 ## Model profiles
 
-With Coarena keys configured and the default profile, task mode starts on Claude Opus 5.5 and retries
-in this order on quota/rate-limit errors: Opus key 1 → Opus key 2 → Fable 5.2
-key 1 → Fable key 2 → the existing OpenCode Go pool. Only populated, distinct
-keys are tried. The free profile keeps using its free-only pool.
+With Coarena keys configured and the default profile, task mode starts on Claude Opus 5.5.
+Automatic fallback keeps the selected Coarena model and tries keys in descending
+order: Fable 5.2 key 4 → key 3 → key 2 → key 1 → the existing OpenCode Go pool.
+If higher slots remain unused, rotation wraps to those in descending order before Go.
+Only populated, distinct keys are tried. The free profile keeps using its free-only pool.
 Low/Medium/High keep their OpenCode Go lineup even when Coarena keys are
 available. To use Coarena for just one agent, select that agent in `/config`.
 Individual retries change only the running agent's model.
@@ -227,7 +228,12 @@ COARENA_API_KEY_1=your_first_key
 COARENA_API_KEY_2=your_second_key
 ```
 
-Then run `node bin/theFactory.js` normally. The CLI loads these two variables
+Add as many keys as you like by continuing the numbering
+(`COARENA_API_KEY_3`, `COARENA_API_KEY_4`, ...). Every populated, distinct key
+becomes another credential slot (`coarena-3`, `coarena-4`, ...) that joins the
+model pool and fallback chain automatically.
+
+Then run `node bin/theFactory.js` normally. The CLI loads these variables
 automatically; exported values take precedence. `.env` is ignored by Git.
 The `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` instructions on Coarena's site
 are for Claude Code and are not needed here.

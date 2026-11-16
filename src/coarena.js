@@ -3,8 +3,18 @@ import { parseEnv } from 'node:util';
 import { AGENT_ORDER } from './agents.js';
 import { baseProfile, globalConfigPath } from './profiles.js';
 
-const KEY_NAMES = ['COARENA_API_KEY_1', 'COARENA_API_KEY_2'];
+// Any number of keys is supported: COARENA_API_KEY_1, _2, _3, ... in .env.
+const KEY_NAME_PATTERN = /^COARENA_API_KEY_([1-9]\d*)$/;
 const MODELS = ['claude-opus-5-5', 'claude-fable-5-2'];
+
+/** Coarena key names found in `values`, ordered by slot number. */
+function keyNames(values) {
+  return Object.keys(values)
+    .map((name) => ({ name, slot: KEY_NAME_PATTERN.exec(name)?.[1] }))
+    .filter(({ slot }) => slot !== undefined)
+    .sort((a, b) => Number(a.slot) - Number(b.slot))
+    .map(({ name }) => name);
+}
 
 /** Load only Coarena credentials, keeping exported variables authoritative. */
 export function loadCoarenaEnv(path = new URL('../.env', import.meta.url), env = process.env) {
@@ -14,25 +24,40 @@ export function loadCoarenaEnv(path = new URL('../.env', import.meta.url), env =
     if (error.code === 'ENOENT') return;
     throw new Error('Cannot read theFactory .env file');
   }
-  for (const name of KEY_NAMES) {
+  for (const name of keyNames(values)) {
     if (env[name] === undefined && values[name] !== undefined) env[name] = values[name];
   }
 }
 
 export function isCoarenaModel(model) {
-  return /^coarena-[12]\//.test(String(model ?? ''));
+  return /^coarena-[1-9]\d*\//.test(String(model ?? ''));
 }
 
 export function coarenaModels(env = process.env) {
   // Reusing the same key twice does not create a second credential.
   const seen = new Set();
-  const slots = KEY_NAMES.flatMap((name, index) => {
+  const slots = keyNames(env).flatMap((name) => {
     const key = env[name]?.trim();
     if (!key || seen.has(key)) return [];
     seen.add(key);
-    return [index + 1];
+    return [Number(KEY_NAME_PATTERN.exec(name)[1])];
   });
   return MODELS.flatMap((model) => slots.map((slot) => `coarena-${slot}/${model}`));
+}
+
+/** Rotate the selected model through keys downward, wrapping to unused higher slots. */
+export function automaticFallbackModels(model, available, fallbackModels) {
+  if (!isCoarenaModel(model)) return [...new Set([...available, ...fallbackModels])].filter((next) => next !== model);
+  const slot = Number(model.split('/')[0].slice('coarena-'.length));
+  const selected = model.split('/')[1].split('#')[0];
+  const keySlot = (next) => Number(next.split('/')[0].slice('coarena-'.length));
+  const sameModel = available.filter((next) => next.split('/')[1] === selected)
+    .sort((a, b) => keySlot(b) - keySlot(a));
+  return [...new Set([
+    ...sameModel.filter((next) => keySlot(next) < slot),
+    ...sameModel.filter((next) => keySlot(next) > slot),
+    ...fallbackModels.filter((next) => !isCoarenaModel(next)),
+  ])].filter((next) => next !== model);
 }
 
 /** Recompute the automatic pool without replacing a user-authored list. */
@@ -42,7 +67,7 @@ export function syncModelRouting(options, goModels, env = process.env) {
   if (options.profile === 'free' && isCoarenaModel(options.model)) options.model = null;
   if (!options.model && options.profile == null && models.length) options.model = models[0];
   if (options.autoFallback) {
-    options.fallbackModels = [...new Set([...models, ...goModels])].filter((m) => m !== options.model);
+    options.fallbackModels = automaticFallbackModels(options.model, models, goModels);
   }
 }
 
@@ -73,9 +98,9 @@ export function coarenaRunEnv(env, model, { allAgents = false } = {}) {
   config.providers ??= {};
   config.experimental ??= {};
   const policies = config.experimental.policies ??= [];
-  for (const [index, name] of KEY_NAMES.entries()) {
+  for (const name of keyNames(env)) {
     if (!env[name]?.trim()) continue;
-    const provider = `coarena-${index + 1}`;
+    const provider = `coarena-${KEY_NAME_PATTERN.exec(name)[1]}`;
     config.providers[provider] = {
       package: '@opencode/ai/providers/anthropic',
       env: [name],
