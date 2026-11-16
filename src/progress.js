@@ -6,13 +6,13 @@ export function promptProgress({ tasks = [], runState = 'idle', overviewReady = 
   if (!total) {
     if (runState === 'done') return { fraction: 1, label: '100% complete', indeterminate: false };
     if (runState === 'idle') return { fraction: 0, label: 'ready', indeterminate: false };
-    if (runState === 'error' || runState === 'aborted') return { fraction: 0, label: runState === 'aborted' ? 'cancelled' : 'incomplete', indeterminate: false };
+    if (runState === 'error' || runState === 'blocked' || runState === 'aborted') return { fraction: 0, label: runState === 'aborted' ? 'cancelled' : 'incomplete', indeterminate: false };
     return { fraction: null, label: phase === 'planning' ? 'planning' : phase === 'recap' ? 'recap' : 'working', indeterminate: true };
   }
   const steps = total + 1; // The final overview is part of completing the prompt.
   const done = completed + (overviewReady && runState === 'done' ? 1 : 0);
   const fraction = Math.min(1, done / steps);
-  const status = runState === 'aborted' ? 'cancelled' : runState === 'error' || runState === 'done' && unfinished ? 'incomplete'
+  const status = runState === 'aborted' ? 'cancelled' : runState === 'error' || runState === 'blocked' || runState === 'done' && unfinished ? 'incomplete'
     : phase === 'recap' ? 'recap' : fraction === 1 ? 'complete' : `${done}/${steps} steps`;
   return { fraction, label: `${Math.floor(fraction * 100)}% ${status}`, indeterminate: false, completed, total, unfinished };
 }

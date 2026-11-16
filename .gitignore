@@ -8,4 +8,6 @@ graphify-out/
 
 vendor/opencode-nolimit/data/keys.json
 .copilot/
+.impeccable/review/
+.impeccable/hook.cache.json
 vendor/opencode-nolimit/data/

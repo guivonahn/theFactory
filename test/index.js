@@ -35,3 +35,10 @@ import './coarena.test.js';
 import './agentModels.test.js';
 import './logFormat.test.js';
 import './profileConfig.test.js';
+
+import './recovery.test.js';
+import './nativeSessions.test.js';
+import './sessionGroups.test.js';
+import './menuBar.test.js';
+import './menuLaunch.test.js';
+import './modelCatalog.test.js';

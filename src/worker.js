@@ -8,7 +8,7 @@
  *   state: queued|running|completed|failed|cancelled, startedAt, finishedAt,
  *   output, error, handle }
  */
-import { launchRunWithFallback } from './run.js';
+import { launchTaskWithRecovery } from './run.js';
 import { createEventBus } from './events.js';
 import { skillPrompt } from './skills.js';
 import { usesCoarena } from './coarena.js';
@@ -52,6 +52,7 @@ export function buildWorkerPrompt({ objective, task, artifacts = [], graphifyGui
 }
 
 export function createWorkerManager(options = {}) {
+  options = { ...options, recoveryState: options.recoveryState ?? new Map() };
   const bus = options.bus ?? createEventBus();
   const workers = new Map();
 
@@ -85,7 +86,52 @@ export function createWorkerManager(options = {}) {
     });
     const responseParts = new Map(); let partSequence = 0;
 
-    const launchedPromise = launchRunWithFallback({
+    const assessResponse = async (report, launched) => {
+      const result = launched.result;
+      record.acceptanceReview = null;
+      record.output = report.slice(-64000);
+      record.acceptanceStatus = workerAcceptance(record.output);
+      record.reportedAcceptanceStatus = record.acceptanceStatus;
+      record.limitations = unfinishedRecap(record.output).replace(/^THEFACTORY_TASK_RESULT:.*$/gm, '').trim();
+      if (record.state !== 'cancelled' && !result?.error && result?.code === 0 && record.acceptanceStatus === 'incomplete' && canReviewAcceptance(task)) {
+        bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: 'rechecking reported blocker against assigned acceptance criteria' });
+        record.acceptanceReview = await reviewAcceptance({
+          objective, task, report: record.output,
+          launcher: options.acceptanceLauncher,
+          onSessionID: (sessionID) => options.onRelatedSession?.({ sessionID, role: 'orchestrator', kind: 'acceptance' }),
+          model: options.model, agentModels: options.agentModels,
+          coarena: usesCoarena(options), autoFallback: options.autoFallback,
+          signal: options.signal, env: options.env, retryRounds: options.retryRounds, retryDelayMs: options.retryDelayMs,
+          recoveryState: options.recoveryState,
+          fallbackModels: options.fallbackModels ?? [], dir: record.dir, bin, auto,
+          isCancelled: () => record.state === 'cancelled',
+          onHandle: (handle) => {
+            record.handle = handle;
+            bus.publish({ runId, workerId: id, taskId: task.id, kind: 'acceptance-review-started', text: 'text-only acceptance review started', meta: { pid: handle.child?.pid ?? null } });
+          },
+        });
+        if (record.state !== 'cancelled' && record.acceptanceReview.decision === 'completed') {
+          record.acceptanceStatus = 'completed';
+          bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `acceptance reviewed: ${record.acceptanceReview.reason}` });
+        } else if (record.state !== 'cancelled' && record.acceptanceReview.decision === 'unavailable') {
+          bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `acceptance review unavailable: ${record.acceptanceReview.reason}; original incomplete status retained` });
+        }
+      }
+      return record.acceptanceStatus === 'incomplete'
+        ? record.acceptanceReview?.reason || record.limitations || 'The assigned acceptance criteria remain unfinished.' : '';
+    };
+
+    const launchedPromise = launchTaskWithRecovery({
+      assessResponse,
+      continuationAttempts: options.continuationAttempts,
+      retryRounds: options.retryRounds,
+      retryDelayMs: options.retryDelayMs,
+      env: options.env,
+      signal: options.signal,
+      recoveryState: options.recoveryState,
+      nativeRecovery: options.nativeRecovery,
+      isCancelled: () => record.state === 'cancelled',
+
       task: prompt,
       agent: role,
       model: resolved,
@@ -102,15 +148,16 @@ export function createWorkerManager(options = {}) {
         bus.publish({ runId, workerId: id, taskId: task.id, sessionId: sid, kind: 'session', text: sid });
       },
       onEvent: (parsed) => {
-        if (parsed.sessionID && !record.sessionId) record.sessionId = parsed.sessionID;
-        if (parsed.text) {
+        const actor = parsed.isSubagent ? parsed.agent : role;
+        if (!parsed.isSubagent && parsed.sessionID && !record.sessionId) record.sessionId = parsed.sessionID;
+        if (!parsed.isSubagent && parsed.text) {
           responseParts.set(parsed.logEntry?.id || `part-${partSequence++}`, parsed.text);
           record.output = [...responseParts.values()].join('\n\n').slice(-64000);
         }
-        if (parsed.error) record.error = parsed.error;
-        if (parsed.logEntry) bus.publish({ runId, workerId: id, taskId: task.id, kind: 'log', meta: { logEntry: { ...parsed.logEntry, model: record.model } } });
+        if (parsed.error || parsed.providerError) record.error = parsed.error || parsed.providerError;
+        if (parsed.logEntry) bus.publish({ runId, workerId: id, taskId: task.id, kind: 'log', meta: { agent: actor, logEntry: { ...parsed.logEntry, model: parsed.isSubagent ? parsed.logEntry.model : record.model } } });
         for (const ev of parsed.events ?? []) {
-          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { fanout: !!ev.fanout, to: ev.to ?? null, logRecorded: Boolean(parsed.logEntry) } });
+          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: parsed.isSubagent ? parsed.sessionID : record.sessionId ?? parsed.sessionID ?? null, kind: ev.kind, text: ev.text, meta: { agent: actor, state: ev.state, recovering: ev.recovering, fanout: !!ev.fanout, to: ev.to ?? null, logRecorded: Boolean(parsed.logEntry) } });
         }
         if (parsed.diff && !parsed.logEntry) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId ?? parsed.sessionID ?? null, kind: 'status', text: parsed.diff });
@@ -118,12 +165,10 @@ export function createWorkerManager(options = {}) {
         if (parsed.permission) {
           bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'permission', text: `⚠ permission requested: ${parsed.permission.action}`, meta: parsed.permission });
         }
-        if (parsed.error) {
-          bus.publish({ runId, workerId: id, taskId: task.id, sessionId: record.sessionId, kind: 'failure', text: `✗ ${parsed.error}` });
-        }
+
       },
-      onHandle: (h) => { record.handle = h; },
-      onRetry: (nextModel, reason) => { responseParts.clear(); record.output = ''; record.model = nextModel; record.error = `retrying: ${reason}`; bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `retrying on ${nextModel}`, meta: { model: nextModel } }); },
+      onHandle: (h) => { record.handle = h; if (!h.nativeChild) record.model = h.model; },
+      onRetry: (nextModel, reason) => { responseParts.clear(); record.output = ''; record.model = nextModel; record.error = null; record.lastRecovery = reason; bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `retrying on ${nextModel}`, meta: { model: nextModel } }); },
       onError: (error) => { record.error = String(error?.message ?? error); },
     });
 
@@ -134,34 +179,16 @@ export function createWorkerManager(options = {}) {
       const launched = await launchedPromise;
       const result = launched?.result;
       record.handle = launched?.handle ?? record.handle;
-      record.acceptanceStatus = workerAcceptance(record.output);
-      record.reportedAcceptanceStatus = record.acceptanceStatus;
-      record.limitations = unfinishedRecap(record.output).replace(/^THEFACTORY_TASK_RESULT:.*$/gm, '').trim();
-      if (record.state !== 'cancelled' && !result?.error && result?.code === 0 && record.acceptanceStatus === 'incomplete' && canReviewAcceptance(task)) {
-        bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: 'rechecking reported blocker against assigned acceptance criteria' });
-        record.acceptanceReview = await reviewAcceptance({
-          objective, task, report: record.output,
-          launcher: options.acceptanceLauncher,
-          model: options.model, agentModels: options.agentModels,
-          coarena: usesCoarena(options), autoFallback: options.autoFallback,
-          fallbackModels: options.fallbackModels ?? [], dir: record.dir, bin, auto,
-          isCancelled: () => record.state === 'cancelled',
-          onHandle: (handle) => {
-            record.handle = handle;
-            bus.publish({ runId, workerId: id, taskId: task.id, kind: 'acceptance-review-started', text: 'text-only acceptance review started', meta: { pid: handle.child?.pid ?? null } });
-          },
-        });
-        if (record.state !== 'cancelled' && record.acceptanceReview.decision === 'completed') {
-          record.acceptanceStatus = 'completed';
-          bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `acceptance reviewed: ${record.acceptanceReview.reason}` });
-        } else if (record.state !== 'cancelled' && record.acceptanceReview.decision === 'unavailable') {
-          bus.publish({ runId, workerId: id, taskId: task.id, kind: 'status', text: `acceptance review unavailable: ${record.acceptanceReview.reason}; original incomplete status retained` });
-        }
-      }
+      record.recoveryAttempts = result?.attempts ?? [];
+      record.partialReports = result?.partialReports ?? [];
+      record.nativeRecoveries = result?.nativeRecoveries ?? [];
+      if (!record.output && record.partialReports.length) record.output = record.partialReports.at(-1);
       record.finishedAt = Date.now();
       if (record.state !== 'cancelled') {
-        if (result?.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
-        else if (result?.code === 0 && record.acceptanceStatus === 'incomplete') { record.state = 'failed'; record.error = `Acceptance criteria unfinished: ${record.limitations.slice(0, 1000) || 'worker reported incomplete; see its report'}`; }
+        if (result?.cancelled) { record.state = 'cancelled'; record.error = null; }
+        else if (result?.blocked) { record.state = 'blocked'; record.error = result.reason || record.error || 'No configured recovery route is currently available'; }
+        else if (result?.error) { record.state = 'failed'; record.error = String(result.error?.message ?? result.error); }
+        else if (result?.code === 0 && record.acceptanceStatus === 'incomplete') { record.state = 'blocked'; record.error = `Acceptance criteria unfinished: ${record.limitations.slice(0, 1000) || 'worker reported incomplete; see its report'}`; }
         else if (result?.code === 0) { record.state = 'completed'; record.error = null; record.model = launched.model; }
         else { record.state = 'failed'; record.error = record.error ?? `exit ${result?.code}`; }
       }
@@ -182,9 +209,9 @@ export function createWorkerManager(options = {}) {
     return killed;
   }
 
-  function list() { return [...workers.values()].map((r) => ({ workerId: r.workerId, taskId: r.taskId, role: r.role, sessionId: r.sessionId, state: r.state, model: r.model, error: r.error, acceptanceStatus: r.acceptanceStatus, reportedAcceptanceStatus: r.reportedAcceptanceStatus, acceptanceReview: r.acceptanceReview, limitations: r.limitations })); }
+  function list() { return [...workers.values()].map((r) => ({ workerId: r.workerId, taskId: r.taskId, role: r.role, sessionId: r.sessionId, state: r.state, model: r.model, error: r.error, acceptanceStatus: r.acceptanceStatus, reportedAcceptanceStatus: r.reportedAcceptanceStatus, acceptanceReview: r.acceptanceReview, recoveryAttempts: r.recoveryAttempts, partialReports: r.partialReports, nativeRecoveries: r.nativeRecoveries, output: r.output, limitations: r.limitations })); }
   function counts() {
-    const out = { total: workers.size, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    const out = { total: workers.size, queued: 0, running: 0, completed: 0, failed: 0, blocked: 0, cancelled: 0 };
     for (const r of workers.values()) out[r.state] = (out[r.state] ?? 0) + 1;
     return out;
   }
@@ -193,6 +220,10 @@ export function createWorkerManager(options = {}) {
 
 /** A failed process is not a successful DAG result just because its promise resolved. */
 export function completedWorker(record) {
-  if (record?.state !== 'completed') throw new Error(record?.error || `${record?.taskId ?? 'worker'} ${record?.state ?? 'did not complete'}`);
+  if (record?.state !== 'completed') {
+    const error = new Error(record?.error || `${record?.taskId ?? 'worker'} ${record?.state ?? 'did not complete'}`);
+    error.blocked = record?.state === 'blocked';
+    throw error;
+  }
   return record;
 }

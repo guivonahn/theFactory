@@ -6,6 +6,7 @@ const T = themeFor('dark');
 export const LOG_FILTERS = ['all', 'messages', 'tools', 'errors'];
 
 export function logMatches(entry, filter) {
+  if (filter === 'errors' && ['recovering', 'blocked'].includes(entry.status)) return false;
   if (filter === 'messages') return entry.kind === 'msg' || entry.kind === 'message';
   if (filter === 'tools') return entry.kind === 'tool';
   if (filter === 'errors') return entry.kind === 'error' || entry.status === 'error' || entry.kind === 'status' && /(?:^!|[✗⚠]|\b(?:failed|error|denied|aborted)\b)/i.test(entry.text);

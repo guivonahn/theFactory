@@ -27,7 +27,7 @@ else if(id==='first') {emit('ready to cancel');setTimeout(()=>process.exit(0),50
 else if(id==='bad') setTimeout(()=>{console.error('fixture failed');process.exit(1)},20);
 else setTimeout(()=>{emit(id==='good'?'producer output':'verified');process.exit(0)},50);
 `, { mode: 0o700 });
-  const manager = createWorkerManager({ model: 'fixture/primary', fallbackModels: ['fixture/secondary'], autoFallback: false, ...options });
+  const manager = createWorkerManager({ continuationAttempts: 0, model: 'fixture/primary', fallbackModels: ['fixture/secondary'], autoFallback: false, ...options });
   const recorded = () => readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
   return { dir, bin, manager, recorded, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -55,7 +55,7 @@ test('a worker reporting unfinished acceptance criteria does not complete its DA
       tasks: [{ id: 'partial', agent: 'developer' }, { id: 'consumer', agent: 'reviewer', deps: ['partial'] }],
       executor: (task) => f.manager.start({ task, bin: f.bin, dir: f.dir }).done.then(completedWorker),
     });
-    assert.equal(result.snapshot[0].state, 'failed');
+    assert.equal(result.snapshot[0].state, 'blocked');
     assert.equal(result.snapshot[1].state, 'blocked');
     assert.match(f.manager.workers.values().next().value.error, /acceptance check/);
   } finally { f.cleanup(); }
@@ -154,7 +154,7 @@ test('rejected or unavailable acceptance reviews still block dependents', async 
     try {
       const result = await runTasks({ tasks: [{ id: 'readme', agent: 'explorer', acceptance: mappingAcceptance }, { id: 'consumer', agent: 'reviewer', deps: ['readme'] }],
         executor: (task) => f.manager.start({ task, bin: f.bin, dir: f.dir }).done.then(completedWorker) });
-      assert.equal(result.snapshot[0].state, 'failed');
+      assert.equal(result.snapshot[0].state, 'blocked');
       assert.equal(result.snapshot[1].state, 'blocked');
       assert.equal(f.manager.list()[0].acceptanceReview.decision, decision);
     } finally { f.cleanup(); }
@@ -172,7 +172,7 @@ test('process failures and incomplete implementation or test tasks are never rev
     ], executor: (task) => f.manager.start({ task, bin: f.bin, dir: f.dir }).done.then(completedWorker) });
     assert.equal(reviews, 0);
     assert.equal(result.snapshot[0].state, 'failed');
-    assert.equal(result.snapshot[1].state, 'failed');
+    assert.equal(result.snapshot[1].state, 'blocked');
     assert.equal(result.snapshot[2].state, 'blocked');
   } finally { f.cleanup(); }
 });

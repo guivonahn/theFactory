@@ -143,7 +143,12 @@ export function createScheduler(options = {}) {
   function markFailed(id, error) {
     const task = tasksById.get(id);
     if (!task || task.state !== 'running') throw new Error(`cannot fail ${id}: not running`);
-    if (task.attempts <= maxRetries) {
+    if (error?.blocked) {
+      task.state = 'blocked';
+      task.error = String(error.message ?? error);
+      emit({ kind: 'blocked', taskId: id, error: task.error });
+      refreshReady();
+    } else if (task.attempts <= maxRetries) {
       task.state = 'ready';
       task.error = String(error?.message ?? error ?? 'failed');
       emit({ kind: 'retry-ready', taskId: id, attempts: task.attempts, error: task.error });

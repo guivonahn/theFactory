@@ -10,6 +10,8 @@ import path from 'node:path';
 import { resolveAgent } from './agents.js';
 import { toolDetail } from './run.js';
 import { toolLogEntry } from './logFormat.js';
+import { sessionOutcome } from './nativeSessions.js';
+import { providerFailure } from './recovery.js';
 
 export const DEFAULT_DB_PATH = path.join(os.homedir(), '.local/share/opencode/opencode.db');
 
@@ -131,6 +133,13 @@ export function fetchChildren(db, rootId) {
   return db.prepare('SELECT * FROM session_v2 WHERE parent_id = ? ORDER BY time_created ASC').all(rootId);
 }
 
+function fetchDescendants(db, rootId) {
+  return db.prepare(`WITH RECURSIVE children(id, depth) AS (
+    SELECT id, 1 FROM session_v2 WHERE parent_id = ?
+    UNION ALL SELECT s.id, c.depth + 1 FROM session_v2 s JOIN children c ON s.parent_id = c.id WHERE c.depth < 8
+  ) SELECT s.* FROM session_v2 s JOIN children c ON s.id = c.id ORDER BY s.time_created ASC LIMIT 200`).all(rootId);
+}
+
 function metaFor(row, isRoot) {
   return {
     id: row.id,
@@ -145,7 +154,7 @@ function latestMessages(db, sessionId, limit) {
     .prepare(
       `SELECT id, session_id, type, seq, time_created, data
        FROM session_message
-       WHERE session_id = ? AND type IN ('user', 'assistant')
+       WHERE session_id = ? AND type IN ('user', 'assistant', 'idle')
        ORDER BY time_created DESC, seq DESC
        LIMIT ?`,
     )
@@ -207,6 +216,17 @@ export function convertRow(row, meta) {
   const rawText = textParts(data).join('\n\n');
   const model = typeof data.model === 'string' ? data.model : data.model?.providerID && data.model?.modelID ? `${data.model.providerID}/${data.model.modelID}` : undefined;
   const logMeta = { id: row.id, timestamp: Number.isFinite(row.time_created) ? row.time_created : undefined, sessionID: row.session_id, model };
+  const actor = meta.isRoot ? resolveAgent(data.agent || 'orchestrator').key : meta.agentKey;
+  const from = actor === 'other' && meta.isRoot ? 'orchestrator' : actor;
+  const outcome = sessionOutcome(row);
+  if (data.error || data.finish === 'error' || row.type === 'idle') {
+    const system = outcome.state !== 'cancelled' && outcome.error && providerFailure(outcome.details ?? outcome.error, { provider: true }).kind === 'system';
+    const text = outcome.state === 'cancelled' ? 'cancelled' : outcome.error ? `${system ? 'System error' : 'Blocked'}: ${outcome.error}`
+      : outcome.state === 'completed' ? 'done' : outcome.state === 'cancelled' ? 'cancelled' : 'idle';
+    return [{ kind: 'status', from, state: system ? 'error' : outcome.state === 'completed' ? 'done' : 'idle',
+      recovering: !system, sessionID: row.session_id,
+      text, logEntry: { ...logMeta, kind: system ? 'error' : 'status', status: outcome.error && !system ? 'blocked' : outcome.state, text } }];
+  }
   if (row.type === 'user') {
     const text = tail(textParts(data).join(' '), 160);
     if (!rawText.trim()) return events;
@@ -224,22 +244,20 @@ export function convertRow(row, meta) {
   const content = Array.isArray(data.content) ? data.content : [];
   if (meta.isRoot) {
     const text = tail(textParts(data).join(' '), 120);
-    if (rawText.trim()) events.push({ kind: 'status', from: 'orchestrator', text: `orchestrator: ${text || 'response'}`, logEntry: { ...logMeta, kind: 'message', dir: 'in', text: rawText } });
-    const named = String(data.agent ?? '').toLowerCase();
-    if (named && named !== 'orchestrator' && resolveAgent(named).key !== 'other') {
-      events.push({ kind: 'status', from: named, text: 'done' });
-    }
+    if (rawText.trim()) events.push({ kind: 'status', from, text: `${from}: ${text || 'response'}`, logEntry: { ...logMeta, kind: 'message', dir: 'in', text: rawText } });
   }
 
   for (const part of content) {
     if (part?.type !== 'tool' && part?.type !== 'tool_use') continue;
-    const state = part.state?.status ? ` (${part.state.status})` : '';
+    const recovering = part.state?.status === 'error';
+    const state = recovering ? ' (recovering)' : part.state?.status ? ` (${part.state.status})` : '';
     const detail = toolDetail(part.state?.input ?? part.input ?? {});
     events.push({
       kind: 'tool',
-      from: meta.isRoot ? 'orchestrator' : meta.agentKey,
+      from,
       text: `${part.name ?? 'tool'}${detail ? `: ${detail}` : ''}${state}`,
-      logEntry: toolLogEntry(part, logMeta),
+      logEntry: { ...toolLogEntry(part, logMeta), ...(recovering ? { status: 'recovering' } : {}) },
+      recovering,
     });
   }
 
@@ -247,7 +265,7 @@ export function convertRow(row, meta) {
   if (!meta.isRoot && rawText.trim()) events.push({ kind: 'msg', from: meta.agentKey, dir: 'in', text: text || rawText, logEntry: { ...logMeta, kind: 'message', dir: 'in', text: rawText } });
 
   if (data.finish === 'stop' || data.finish === 'completed') {
-    events.push({ kind: 'status', from: meta.agentKey, text: 'done' });
+    events.push({ kind: 'status', from, text: 'done', state: 'done', sessionID: row.session_id });
   }
   return events;
 }
@@ -304,7 +322,7 @@ export class LiveSource {
   _loadSessions() {
     this.sessions.clear();
     this.sessions.set(this.root.id, metaFor(this.root, true));
-    for (const child of fetchChildren(this.db, this.root.id)) {
+    for (const child of fetchDescendants(this.db, this.root.id)) {
       this.sessions.set(child.id, metaFor(child, false));
     }
   }
@@ -344,7 +362,7 @@ export class LiveSource {
 
   _discoverChildren() {
     const discovered = [];
-    for (const child of fetchChildren(this.db, this.root.id)) {
+    for (const child of fetchDescendants(this.db, this.root.id)) {
       if (this.sessions.has(child.id)) continue;
       const meta = metaFor(child, false);
       this.sessions.set(child.id, meta);
@@ -374,7 +392,7 @@ export class LiveSource {
         .prepare(
           `SELECT id, session_id, type, seq, time_created, data
            FROM session_message
-           WHERE session_id = ? AND type IN ('user', 'assistant')
+           WHERE session_id = ? AND type IN ('user', 'assistant', 'idle')
              AND (time_created > ? OR (time_created = ? AND seq > ?))
            ORDER BY time_created ASC, seq ASC`,
         )

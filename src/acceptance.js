@@ -69,7 +69,7 @@ export async function reviewAcceptance({ objective, task, report, launcher = lau
     });
     if (isCancelled()) return { decision: 'unavailable', reason: 'cancelled' };
     if (timedOut) return { decision: 'unavailable', reason: 'acceptance review timed out' };
-    if (launched.result?.error || launched.result?.code !== 0) throw new Error(providerError || launched.result?.error?.message || launched.result?.stderr?.trim() || `review exited ${launched.result?.code}`);
+    if (launched.result?.error || launched.result?.code !== 0) throw new Error(providerError || launched.result?.reason || launched.result?.error?.message || launched.result?.stderr?.trim() || `review exited ${launched.result?.code}`);
     return { ...parseAcceptanceReview([...chunks.values()].join('\n\n'), { task, report: excerpt }), model: launched.model ?? null };
   } catch (error) {
     // No response, invalid JSON, absent evidence or provider failure never turns

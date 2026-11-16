@@ -1,0 +1,353 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-15T21:14:21.267887+00:00",
+  "title": "Design System: theFactory macOS Companion",
+  "extensions": {
+    "colorMeta": {
+      "explorer-cyan": {
+        "role": "primary",
+        "displayName": "Explorer Cyan",
+        "canonical": "#64D2FF",
+        "tonalRamp": [
+          "oklch(15% 0.1185 227.75)",
+          "oklch(26% 0.1185 227.75)",
+          "oklch(38% 0.1185 227.75)",
+          "oklch(49% 0.1185 227.75)",
+          "oklch(61% 0.1185 227.75)",
+          "oklch(72% 0.1185 227.75)",
+          "oklch(84% 0.1185 227.75)",
+          "oklch(95% 0.1185 227.75)"
+        ]
+      },
+      "architect-purple": {
+        "role": "primary",
+        "displayName": "Architect Purple",
+        "canonical": "#BF5AF2",
+        "tonalRamp": [
+          "oklch(15% 0.2274 312.42)",
+          "oklch(26% 0.2274 312.42)",
+          "oklch(38% 0.2274 312.42)",
+          "oklch(49% 0.2274 312.42)",
+          "oklch(61% 0.2274 312.42)",
+          "oklch(72% 0.2274 312.42)",
+          "oklch(84% 0.2274 312.42)",
+          "oklch(95% 0.2274 312.42)"
+        ]
+      },
+      "developer-green": {
+        "role": "primary",
+        "displayName": "Developer Green",
+        "canonical": "#30D158",
+        "tonalRamp": [
+          "oklch(15% 0.2082 146.98)",
+          "oklch(26% 0.2082 146.98)",
+          "oklch(38% 0.2082 146.98)",
+          "oklch(49% 0.2082 146.98)",
+          "oklch(61% 0.2082 146.98)",
+          "oklch(72% 0.2082 146.98)",
+          "oklch(84% 0.2082 146.98)",
+          "oklch(95% 0.2082 146.98)"
+        ]
+      },
+      "reviewer-yellow": {
+        "role": "primary",
+        "displayName": "Reviewer Yellow",
+        "canonical": "#FFD60A",
+        "tonalRamp": [
+          "oklch(15% 0.1805 94.78)",
+          "oklch(26% 0.1805 94.78)",
+          "oklch(38% 0.1805 94.78)",
+          "oklch(49% 0.1805 94.78)",
+          "oklch(61% 0.1805 94.78)",
+          "oklch(72% 0.1805 94.78)",
+          "oklch(84% 0.1805 94.78)",
+          "oklch(95% 0.1805 94.78)"
+        ]
+      },
+      "security-red": {
+        "role": "primary",
+        "displayName": "Security Red",
+        "canonical": "#FF453A",
+        "tonalRamp": [
+          "oklch(15% 0.2236 28.29)",
+          "oklch(26% 0.2236 28.29)",
+          "oklch(38% 0.2236 28.29)",
+          "oklch(49% 0.2236 28.29)",
+          "oklch(61% 0.2236 28.29)",
+          "oklch(72% 0.2236 28.29)",
+          "oklch(84% 0.2236 28.29)",
+          "oklch(95% 0.2236 28.29)"
+        ]
+      },
+      "tester-blue": {
+        "role": "primary",
+        "displayName": "Tester Blue",
+        "canonical": "#0A84FF",
+        "tonalRamp": [
+          "oklch(15% 0.2056 255.49)",
+          "oklch(26% 0.2056 255.49)",
+          "oklch(38% 0.2056 255.49)",
+          "oklch(49% 0.2056 255.49)",
+          "oklch(61% 0.2056 255.49)",
+          "oklch(72% 0.2056 255.49)",
+          "oklch(84% 0.2056 255.49)",
+          "oklch(95% 0.2056 255.49)"
+        ]
+      },
+      "other-gray": {
+        "role": "neutral",
+        "displayName": "Other Gray",
+        "canonical": "#8E8E93",
+        "tonalRamp": [
+          "oklch(15% 0.0073 286.19)",
+          "oklch(26% 0.0073 286.19)",
+          "oklch(38% 0.0073 286.19)",
+          "oklch(49% 0.0073 286.19)",
+          "oklch(61% 0.0073 286.19)",
+          "oklch(72% 0.0073 286.19)",
+          "oklch(84% 0.0073 286.19)",
+          "oklch(95% 0.0073 286.19)"
+        ]
+      },
+      "working-text-light": {
+        "role": "secondary",
+        "displayName": "Working Text Light",
+        "canonical": "#1B733A",
+        "tonalRamp": [
+          "oklch(15% 0.1206 150.47)",
+          "oklch(26% 0.1206 150.47)",
+          "oklch(38% 0.1206 150.47)",
+          "oklch(49% 0.1206 150.47)",
+          "oklch(61% 0.1206 150.47)",
+          "oklch(72% 0.1206 150.47)",
+          "oklch(84% 0.1206 150.47)",
+          "oklch(95% 0.1206 150.47)"
+        ]
+      },
+      "attention-text-light": {
+        "role": "secondary",
+        "displayName": "Attention Text Light",
+        "canonical": "#8A4B00",
+        "tonalRamp": [
+          "oklch(15% 0.1124 59.93)",
+          "oklch(26% 0.1124 59.93)",
+          "oklch(38% 0.1124 59.93)",
+          "oklch(49% 0.1124 59.93)",
+          "oklch(61% 0.1124 59.93)",
+          "oklch(72% 0.1124 59.93)",
+          "oklch(84% 0.1124 59.93)",
+          "oklch(95% 0.1124 59.93)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Product name; native 16-point semibold."
+      },
+      "objective": {
+        "displayName": "Objective",
+        "purpose": "Two-line session objective; native 15-point medium."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Idle label and crew names; native 12-point medium."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Project, elapsed time, status and controls; native 11 points."
+      },
+      "detail": {
+        "displayName": "Detail",
+        "purpose": "Roles, task detail and supporting copy; native 10 points."
+      },
+      "idle-brand": {
+        "displayName": "Idle Brand",
+        "purpose": "Centered idle home product name; native 28-point semibold."
+      },
+      "configuration-title": {
+        "displayName": "Configuration Title",
+        "purpose": "New session or target-specific model header; native 14-point semibold."
+      },
+      "field-label": {
+        "displayName": "Field Label",
+        "purpose": "Secondary configuration field and group labels; native 11-point semibold."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "factory-timeline",
+        "value": "12 fps maximum requested cadence",
+        "purpose": "Working-session native TimelineView minimum interval 1/12 second; paused unless visible, active and Reduce Motion is off."
+      },
+      {
+        "name": "worker-bob",
+        "value": "sin(time * 5 + index * 1.7) * 1.4pt",
+        "purpose": "Active worker vertical movement."
+      },
+      {
+        "name": "idle-snoozing-timeline",
+        "value": "8 fps maximum requested cadence",
+        "purpose": "Separate snoozing TimelineView minimum interval 1/8 second; only visible and Reduce Motion off. Factory machinery stays still."
+      },
+      {
+        "name": "idle-breathing",
+        "value": "sin((time * 5 + index * 1.7) * 0.25) * 0.8pt",
+        "purpose": "Gentle breathing bob for the six snoozing workers."
+      },
+      {
+        "name": "idle-z-drift",
+        "value": "4s cycle; up 13pt and right 4pt",
+        "purpose": "Lowercase z marks rise and fade to 0.4 opacity; paused rendering uses drift 0.4."
+      }
+    ],
+    "breakpoints": [],
+    "nativeAppearance": {
+      "surface": "NSColor.windowBackgroundColor at 0.55 opacity",
+      "primaryInk": "SwiftUI Color.primary / AppKit NSColor.labelColor",
+      "secondaryInk": "SwiftUI Color.secondary",
+      "attention": "Light small semantic text and header status dots: #8A4B00; dark: SwiftUI Color.orange. Scene attention badges and progress tint remain native orange.",
+      "runningOrDone": "Light small semantic session text and header status dots: #1B733A; dark: SwiftUI Color.green.",
+      "progress": "SwiftUI Color.accentColor; orange for attention",
+      "orchestrator": "Adaptive primary ink overrides its incoming white role color",
+      "chrome": "NSPopover owns shadow, shape and control interaction states",
+      "inputSurface": "NSColor.textBackgroundColor; NSColor.separatorColor at 0.5pt for prompt outline",
+      "settingsGroup": "NSColor.controlBackgroundColor; 12pt radius; native row dividers inset 12pt."
+    },
+    "previewNotes": "HTML/CSS are self-contained portable references, not pixel-equivalent AppKit controls. Tonal ramps are synthesized OKLCH panel metadata, not shipping colors. Typography px values represent native point values. Source: Sources/FactoryMenuBar/*.swift; review evidence: ../.impeccable/review/.",
+    "nativeLayout": {
+      "width": "380pt",
+      "height": "min(610, max(420, visibleScreenHeight - 50))pt",
+      "scene": "126pt",
+      "crewSelection": "First six active workers including orchestrator, then inactive non-orchestrators; full list stays available.",
+      "launcher": "Start work opens Task/Agents/Options native segmented configuration with one shared draft. Back returns to idle with no session or a ready idle terminal without activity/attention; other session results return to monitor. Pane padding: horizontal20pt top14pt bottom16pt; section gap18pt; prompt140pt; fixed trailing launch action.",
+      "launchConnection": "Switch to newly observed task only when its launch request ID matches; settings apply before launch.",
+      "idleHome": "Vertically centered stack; brand 28pt semibold, Idle 12pt medium with 8pt top gap; 270pt Canvas scaled 1.2 in 160pt region with 26pt top gap; single large Start work button after 24pt. No header/footer or other buttons.",
+      "idleRouting": "Idle home appears with no session, or a ready terminal whose state is idle with no activity/attention. Completed, cancelled and attention results retain the monitor.",
+      "configurationHeader": "Borderless back chevron; New session or target-specific model label 14pt semibold; factory template icon at 0.5 opacity. Model Back cancels without committing. Configuration segmented picker insets horizontal20pt top14pt bottom6pt.",
+      "configurationRows": "Grouped native controlBackgroundColor radius12pt. Setting rows horizontal12pt vertical9pt; model rows horizontal12pt vertical7pt; switch rows horizontal12pt vertical10pt. Task picker slot174pt; verbosity152pt.",
+      "launchBar": "Native divider; feedback above trailing Start in Terminal and Opens Terminal caption; horizontal20pt bottom14pt; stack gap10pt; minimum action-label width116pt.",
+      "modelSelection": "Same popover replaces configuration panes with search/count/feedback, inset native provider-grouped List and pinned confirm footer. Search horizontal20pt top16pt bottom10pt, gap8pt. Rows 12pt text/minimum23pt. Footer horizontal20pt bottom14pt gap10pt. coarena groups first; inheritance first row; Current selection section preserves saved values outside catalog."
+    },
+    "modelSelectionBehavior": {
+      "entry": "Shared model plus all seven agent rows use small native bordered selector buttons, 11pt middle-truncated label and full-value help.",
+      "commit": "Highlight is provisional; Use model/Use default commits, Return confirms; Back cancels unchanged.",
+      "catalog": "Project CLI model catalog plus configured aliases; asynchronous refresh/loading/error/empty states. Catalog presence does not assert provider inference health.",
+      "search": "Case-insensitive match against full identifier; visible result count; Refresh disabled while loading."
+    }
+  },
+  "components": [
+    {
+      "name": "Model selector",
+      "kind": "button",
+      "description": "Portable reference for the shared and per-agent small bordered native selector; opens the same in-popover catalog.",
+      "html": "<button class=\"ds-model-selector\" aria-label=\"Choose model for all agents\"><span>Use the selected profile</span><svg width=\"8\" height=\"12\" viewBox=\"0 0 8 12\" aria-hidden=\"true\"><path d=\"m1 4 3-3 3 3M1 8l3 3 3-3\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.2\"/></svg></button>",
+      "css": ".ds-model-selector{display:flex;align-items:center;gap:6px;width:100%;font:400 11px system-ui,-apple-system,sans-serif;padding:3px 6px;border:1px solid GrayText;border-radius:5px;background:ButtonFace;color:ButtonText}.ds-model-selector span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}.ds-model-selector:hover{filter:brightness(.96)}.ds-model-selector:focus-visible{outline:2px solid Highlight;outline-offset:2px}.ds-model-selector:active{filter:brightness(.9)}"
+    },
+    {
+      "name": "Model catalog list",
+      "kind": "custom",
+      "description": "Portable grouped-list reference; production uses native inset List selection and a separate pinned confirmation footer.",
+      "html": "<div class=\"ds-model-list\"><label class=\"ds-model-option\"><input type=\"radio\" name=\"ds-model\" checked><span>Use selected profile</span></label><div class=\"ds-model-provider\">coarena-1</div><label class=\"ds-model-option\"><input type=\"radio\" name=\"ds-model\"><span>claude-opus-5-5</span></label><label class=\"ds-model-option\"><input type=\"radio\" name=\"ds-model\"><span>claude-fable-5-2</span></label><div class=\"ds-model-confirm\"><small>Use selected profile</small><button>Use default</button></div></div>",
+      "css": ".ds-model-list{font:400 12px system-ui,-apple-system,sans-serif;color:CanvasText}.ds-model-provider{font-size:11px;font-weight:600;color:GrayText;padding:18px 6px 6px}.ds-model-option{display:block;position:relative}.ds-model-option input{position:absolute;opacity:0}.ds-model-option span{display:block;min-height:23px;padding:4px 6px;border-radius:5px}.ds-model-option input:checked+span{background:color-mix(in srgb,CanvasText 12%,Canvas)}.ds-model-option:hover span{background:color-mix(in srgb,CanvasText 6%,Canvas)}.ds-model-option input:focus-visible+span{outline:2px solid Highlight;outline-offset:1px}.ds-model-confirm{display:flex;flex-direction:column;align-items:flex-end;gap:10px;border-top:1px solid GrayText;padding-top:10px;margin-top:10px}.ds-model-confirm small{align-self:flex-start;color:GrayText;font-size:10px}.ds-model-confirm button{font:400 13px system-ui,-apple-system,sans-serif;padding:6px 12px;border:0;border-radius:18px;background:ButtonFace;color:ButtonText}.ds-model-confirm button:hover{filter:brightness(.96)}.ds-model-confirm button:focus-visible{outline:2px solid Highlight;outline-offset:2px}.ds-model-confirm button:active{filter:brightness(.9)}"
+    },
+    {
+      "name": "Crew row",
+      "kind": "custom",
+      "description": "Informational row with role color, current detail and an explicit state; reference SVG approximates the native SF Symbol.",
+      "html": "<div class=\"ds-row\"><svg aria-hidden=\"true\" width=\"18\" height=\"24\" viewBox=\"0 0 18 24\"><path d=\"m6 8-4 4 4 4m6-8 4 4-4 4M10 7 8 17\" fill=\"none\" stroke=\"#30D158\" stroke-width=\"1.6\" stroke-linecap=\"round\"/></svg><div class=\"ds-row-copy\"><span class=\"ds-row-name\">denver <span class=\"ds-row-role\">developer</span></span><span class=\"ds-row-detail\">Connecting live agent progress</span></div><span class=\"ds-row-state\">\u2022 Working</span></div>",
+      "css": ".ds-row{font-family:system-ui,-apple-system,sans-serif;color:CanvasText;display:flex;align-items:center;gap:10px;min-height:37px;padding:3px 0}.ds-row-copy{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}.ds-row-name{font-size:12px;font-weight:500}.ds-row-role,.ds-row-detail{font-size:10px;font-weight:400;color:GrayText}.ds-row-detail{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-row-state{font-size:10px;white-space:nowrap}",
+      "refersTo": "crew-row"
+    },
+    {
+      "name": "Observed progress",
+      "kind": "custom",
+      "description": "Accessible portable reference for the native small progress control; no-plan state uses native indeterminate progress.",
+      "html": "<div class=\"ds-progress\"><div class=\"ds-progress-label\"><span>Working</span><span>40% 2/5 steps</span></div><progress aria-label=\"Plan progress\" max=\"100\" value=\"40\">40%</progress></div>",
+      "css": ".ds-progress{font-family:system-ui,-apple-system,sans-serif;color:CanvasText;font-size:11px}.ds-progress-label{display:flex;justify-content:space-between;margin-bottom:6px}.ds-progress-label span:last-child{color:GrayText;font-variant-numeric:tabular-nums}.ds-progress progress{display:block;width:100%;height:6px;accent-color:AccentColor}"
+    },
+    {
+      "name": "Dumpling worker",
+      "kind": "custom",
+      "description": "Static vector reference only; SwiftUI Canvas provides the native state-driven drawing and animation.",
+      "html": "<svg class=\"ds-worker\" role=\"img\" aria-label=\"Developer working\" width=\"64\" height=\"60\" viewBox=\"0 0 64 60\"><rect x=\"17\" y=\"14\" width=\"24\" height=\"23\" rx=\"9\" fill=\"#30D158\" fill-opacity=\".22\" stroke=\"#30D158\" stroke-width=\"1.6\"/><path d=\"M26 14q4 0 5 5M23 38l-2 2m14-2 2 2m-21-16-5 2m31-2 5 2\" stroke=\"#30D158\" stroke-width=\"1.6\" fill=\"none\" stroke-linecap=\"round\"/><ellipse cx=\"25\" cy=\"23\" rx=\"1\" ry=\"1.25\"/><ellipse cx=\"33\" cy=\"23\" rx=\"1\" ry=\"1.25\"/><path d=\"M27 29q2 3 4 0\" fill=\"none\" stroke=\"currentColor\"/><rect x=\"40\" y=\"28\" width=\"12\" height=\"8\" rx=\"1\" fill=\"Canvas\" stroke=\"#30D158\"/></svg>",
+      "css": ".ds-worker{color:CanvasText}.ds-worker ellipse{fill:currentColor}",
+      "refersTo": "worker"
+    },
+    {
+      "name": "Start in Terminal",
+      "kind": "button",
+      "description": "Trailing large native prominent action in the fixed launch bar, minimum label width 116pt; Command-Return. Portable reference only.",
+      "html": "<button class=\"ds-start\">Start in Terminal</button>",
+      "css": ".ds-start{font-family:system-ui,-apple-system,sans-serif;font-size:13px;min-width:116px;padding:6px 12px;border:0;border-radius:18px;color:ButtonText;background:ButtonFace}.ds-start:hover{filter:brightness(.96)}.ds-start:focus-visible{outline:2px solid Highlight;outline-offset:2px}.ds-start:active{filter:brightness(.9)}.ds-start:disabled{opacity:.5;cursor:default}"
+    },
+    {
+      "name": "Model search",
+      "kind": "input",
+      "description": "Portable reference for native rounded model/provider search. Refresh and loading feedback remain adjacent in production.",
+      "html": "<input class=\"ds-model-search\" aria-label=\"Search available models\" placeholder=\"Search models or providers\">",
+      "css": ".ds-model-search{font:400 12px system-ui,-apple-system,sans-serif;width:100%;padding:4px 6px;border:1px solid GrayText;border-radius:6px;background:Canvas;color:CanvasText}.ds-model-search:hover{border-color:CanvasText}.ds-model-search:focus-visible{outline:2px solid Highlight;outline-offset:1px}"
+    },
+    {
+      "name": "Multiline prompt",
+      "kind": "input",
+      "description": "Portable reference for the native 140-point prompt editor with 10-point radius and 6-point inner editor padding.",
+      "html": "<label class=\"ds-prompt\">Prompt<textarea aria-label=\"Prompt for the new session\" placeholder=\"What should the crew work on?\"></textarea></label>",
+      "css": ".ds-prompt{display:flex;flex-direction:column;gap:7px;font:600 11px system-ui,-apple-system,sans-serif;color:GrayText}.ds-prompt textarea{font:400 12px system-ui,-apple-system,sans-serif;height:140px;padding:10px 11px;border:.5px solid GrayText;border-radius:10px;background:Canvas;color:CanvasText;resize:none}.ds-prompt textarea:hover{border-color:CanvasText}.ds-prompt textarea:focus-visible{outline:2px solid Highlight;outline-offset:1px}",
+      "refersTo": "prompt-editor"
+    },
+    {
+      "name": "Configuration panes",
+      "kind": "nav",
+      "description": "Portable reference for the native Task/Agents/Options segmented picker. All panes share one launch draft.",
+      "html": "<div class=\"ds-panes\" role=\"group\" aria-label=\"Session configuration\"><label><input type=\"radio\" name=\"ds-pane\" checked><span>Task</span></label><label><input type=\"radio\" name=\"ds-pane\"><span>Agents</span></label><label><input type=\"radio\" name=\"ds-pane\"><span>Options</span></label></div>",
+      "css": ".ds-panes{display:inline-flex;gap:0;padding:2px;border-radius:7px;background:ButtonFace;color:ButtonText;font:400 12px system-ui,-apple-system,sans-serif}.ds-panes label{position:relative}.ds-panes input{position:absolute;opacity:0}.ds-panes span{display:block;padding:3px 12px;border-radius:5px}.ds-panes input:checked+span{background:color-mix(in srgb,ButtonText 15%,ButtonFace)}.ds-panes label:hover span{background:color-mix(in srgb,ButtonText 8%,ButtonFace)}.ds-panes input:focus-visible+span{outline:2px solid Highlight;outline-offset:1px}.ds-panes label:active span{opacity:.75}"
+    },
+    {
+      "name": "Start work",
+      "kind": "button",
+      "description": "The idle home\u2019s single native large prominent action, with Return shortcut; opens configuration. Portable reference only.",
+      "html": "<button class=\"ds-start-work\">Start work</button>",
+      "css": ".ds-start-work{font:400 13px system-ui,-apple-system,sans-serif;padding:6px 14px;border:0;border-radius:18px;color:ButtonText;background:ButtonFace}.ds-start-work:hover{filter:brightness(.96)}.ds-start-work:focus-visible{outline:2px solid Highlight;outline-offset:2px}.ds-start-work:active{filter:brightness(.9)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "A glance into the same little factory",
+    "overview": "This record covers the native companion under `macos/`. It extends the established CLI's industrial skyline, named agents and dumpling workers into a compact macOS popover. It does not redefine the terminal application's typography, layout or theme.\n\nThe interface is calm, compact and utilitarian. Native text, separators and controls provide the frame; the small factory floor supplies the recognizable personality. The idle home centers the brand above six snoozing workers and one Start work action. That action opens the launch form, which collects a directory, prompt and prelaunch settings. Once a session connects, its objective and observed progress lead into the animated crew, with names and explicit states keeping the illustration accountable to the current session.",
+    "keyCharacteristics": [
+      "Native macOS appearance and controls.",
+      "Compact system typography with clear objective, crew and metadata roles.",
+      "Exact inherited agent colors, with adaptive neutral ink for the orchestrator.",
+      "Vector factory and dumpling workers that distinguish snoozing from observed session activity."
+    ],
+    "rules": [
+      {
+        "name": "The Role and State Rule",
+        "body": "Agent hue identifies role; text and status symbols communicate working, completed and attention states.",
+        "section": "colors"
+      },
+      {
+        "name": "The Observed Activity Rule",
+        "body": "In session scenes, animate actual active workers; in the idle home, use only the separate snoozing motion. Pause both with the popover closed or Reduce Motion enabled.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "**Do** preserve native appearance, semantic text colors, controls and focus behavior.",
+      "**Do** pair role colors with names, explicit states and accessible descriptions.",
+      "**Do** prioritize active workers in the illustration and retain the complete crew in the list.",
+      "**Do** pause animation when hidden or Reduce Motion is enabled.",
+      "**Do** keep each configuration pane scrollable while the launch action remains reachable.",
+      "**Do** keep this record scoped to the native macOS companion."
+    ],
+    "donts": [
+      "**Don't** replace adaptive native surfaces and text with fixed screenshot samples.",
+      "**Don't** imply a percentage when the session has no plan.",
+      "**Don't** use celebratory copy for blocked or error sessions.",
+      "**Don't** turn review screenshots into shipping artwork or replace the Canvas workers with rasters.",
+      "**Don't** imply prelaunch settings modify an already-running session.",
+      "**Don't** treat the portable sidecar previews as replacements for native SwiftUI controls."
+    ]
+  }
+}

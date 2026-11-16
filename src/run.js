@@ -11,6 +11,8 @@ import { automaticFallbackModels, coarenaModels, coarenaRunEnv, isCoarenaModel, 
 import { agentModelsRunEnv, hasAgentModels, MODEL_AGENT_KEYS } from './agentModels.js';
 import { toolLogEntry } from './logFormat.js';
 import { agentPromptsRunEnv } from './agentPrompts.js';
+import { providerFailure, recoveryEvent, unfinishedResponse } from './recovery.js';
+import { createNativeSessionMonitor } from './nativeSessions.js';
 
 const STDERR_TAIL = 2000;
 
@@ -227,6 +229,7 @@ export function parseRunLine(line) {
       data.error?.message ?? data.error?.data?.message ?? data.message ?? part.text ?? part.state?.error ?? (typeof data.error === 'object' ? JSON.stringify(data.error) : data.error) ?? '',
     );
     result.error = error || 'run error';
+    result.errorDetails = data.error ?? { message: result.error };
     result.logEntry = { kind: 'error', text: result.error, ...logMeta };
     result.events.push({ kind: 'status', from: 'orchestrator', text: `⚠ ${tail(result.error, 100)}` });
     return result;
@@ -258,7 +261,7 @@ export function argsForRun(options = {}) {
   const task = String(options.task ?? '');
   const auto = options.auto === true;
   const args = ['run', '--format', 'json'];
-  if (usesCoarena(options) || hasAgentModels(options)) args.push('--standalone');
+  if (usesCoarena(options) || hasAgentModels(options) || options.nativeRecovery) args.push('--standalone');
   if (auto) args.push('--auto');
   if (options.sessionID) args.push('--session', options.sessionID);
   else if (options.continue) args.push('--continue');
@@ -288,7 +291,7 @@ export function launchRun(options = {}) {
     cwd: options.dir || process.cwd(),
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: false,
+    detached: Boolean(options.nativeRecovery && process.platform !== 'win32'),
   });
 
   let sessionID = null;
@@ -435,6 +438,7 @@ export function launchRun(options = {}) {
 
   const handle = {
     child,
+    agent: options.agent ?? 'orchestrator',
     model: options.model,
     agentModels: {
       ...(allAgents ? Object.fromEntries(MODEL_AGENT_KEYS.map((agent) => [agent, options.model])) : {}),
@@ -468,7 +472,10 @@ export function launchRun(options = {}) {
       done.then(callback).catch(() => {});
       return handle;
     },
-    kill(signal = 'SIGTERM') {
+    interrupt(signal = 'SIGTERM') {
+      if (options.nativeRecovery && process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, signal); return true; } catch {}
+      }
       if (child.exitCode !== null || child.signalCode) return false;
       try {
         return child.kill(signal);
@@ -476,72 +483,301 @@ export function launchRun(options = {}) {
         return false;
       }
     },
+    kill(signal = 'SIGTERM') { return handle.interrupt(signal); },
+    async settleGroup() {
+      if (!options.nativeRecovery || process.platform === 'win32' || !child.pid) return;
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline) {
+        try { process.kill(-child.pid, 0); } catch { return; }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    },
   };
   return handle;
 }
 
-/**
- * True for provider-quota / transient failures that justify trying another model.
- * Note: free models share one account quota — retrying another free model will
- * 429 until reset, but still tries (bounded). `no-route` (unsupported package/
- * variant) retries a different model too.
- */
+/** Backward-compatible predicate for retryable quota, network and model errors. */
 export function isTransientProviderError(text) {
-  return /provider\.quota|usage[ _-]+limits?|payment[ _-]required|insufficient[ _-]balance|not part of the free tier|add credits|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
+  const failure = providerFailure(text);
+  return failure.switchModel && failure.kind !== 'authentication';
 }
 
 /**
- * Launch `opencode run`, retrying quota/no-route failures with the next model
- * in `fallbackModels` (bounded, backoff). Returns { handle, done } like launchRun
- * but `done` resolves only after the final attempt. Events carry the model in meta.
- * Falls back only on transient errors; other failures resolve immediately.
+ * Try every configured route, then retry temporary failures in bounded rounds.
+ * Provider availability ends in a blocker; process/configuration faults are errors.
+ * Never create a fresh session to replay work after a provider interruption.
  */
 export async function launchRunWithFallback(options = {}) {
   options = { ...options, model: options.agentModels?.[options.agent ?? 'orchestrator'] ?? options.model };
   options = { ...options, coarena: usesCoarena(options) };
-  let models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [options.model].filter(Boolean);
+  let models = Array.isArray(options.fallbackModels) ? options.fallbackModels : [];
   if (options.autoFallback && options.coarena) {
     const available = coarenaModels({ ...process.env, ...options.env });
     models = automaticFallbackModels(options.model, available, models);
   }
-  const pool = [options.model ?? null, ...models.filter(Boolean)];
-  const unique = [];
-  for (const m of pool) {
-    if (!unique.includes(m)) unique.push(m);
-  }
-  const maxAttempts = Math.max(1, unique.length);
-  const backoff = (n) => new Promise((r) => setTimeout(r, Math.min(2000, 250 * 2 ** n)));
+  const pool = [...new Set([options.model ?? null, ...models.filter(Boolean)])];
+  const retryRounds = Math.max(0, Math.min(3, options.retryRounds ?? 2));
+  const history = [];
   let sessionID = options.sessionID;
-  let cancelled = false;
-  let lastHandle = null;
-  let lastResult = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const model = unique[attempt];
-    const handle = launchRun({ ...options, model, sessionID, fallbackAttempt: attempt > 0, onExit: undefined });
+  let cancelled = options.signal?.aborted ?? false;
+  let activeHandle, wakeBackoff;
+  const abort = () => { cancelled = true; activeHandle?.kill('SIGTERM'); wakeBackoff?.(); };
+  options.signal?.addEventListener('abort', abort, { once: true });
+  const wait = (attempt) => new Promise((resolve) => {
+    const timer = setTimeout(done, Math.max(0, Math.min(5000, (options.retryDelayMs ?? 250) * 2 ** Math.min(attempt, 5))));
+    function done() { clearTimeout(timer); wakeBackoff = null; resolve(); }
+    wakeBackoff = done;
+    if (cancelled) done();
+  });
+  let lastHandle = null, lastResult = { code: 1, signal: 'SIGTERM', cancelled: true }, lastModel = options.model;
+  let queue = pool.map((model) => ({ model, round: 0 }));
+  try {
+    while (queue.length && !cancelled) {
+      const { model, round } = queue.shift();
+      const unavailable = options.recoveryState?.get(model);
+      if (unavailable) {
+        history.push({ ...unavailable, skipped: true });
+        lastModel = model;
+        lastResult = { code: 1, blocked: true, failureKind: unavailable.kind, reason: unavailable.reason, attempts: [...history] };
+        continue;
+      }
+      let streamedError = '', details = null, hasText = false, permissionBlock = '';
+      let handle, idleTimer, errorTimer, escalation, interrupted = false;
+      let nativeTimer, nativeFailures = [];
+      const nativeMonitor = options.nativeRecovery && !options.reportOnly
+        ? createNativeSessionMonitor({ path: options.nativeDatabase ?? options.env?.OPENCODE_DB, since: Date.now() }) : null;
+      const checkChildren = () => {
+        if (!handle || nativeFailures.length || cancelled) return;
+        const snapshot = nativeMonitor?.scan(handle.sessionID() ?? sessionID);
+        if (!snapshot?.failures.length || snapshot.active.length) return;
+        nativeFailures = snapshot.failures;
+        // Stop the private parent and its tools before resuming any child.
+        interrupted = true;
+        handle.interrupt('SIGTERM');
+        escalation = setTimeout(() => handle.interrupt('SIGKILL'), 2500);
+        escalation.unref?.();
+      };
+      const idleMs = options.idleTimeoutMs ?? Number(process.env.FACTORY_PROVIDER_IDLE_TIMEOUT_MS || 180000);
+      const interrupt = (reason) => {
+        interrupted = true;
+        streamedError ||= reason;
+        handle?.interrupt('SIGTERM');
+        escalation = setTimeout(() => handle?.interrupt('SIGKILL'), 2500);
+        escalation.unref?.();
+      };
+      const resetIdle = (parsed) => {
+        clearTimeout(idleTimer);
+        // Tool commands can legitimately run longer than an API response.
+        if (parsed?.tool && ['running', 'pending'].includes(parsed.logEntry?.status)) return;
+        if (idleMs > 0) { idleTimer = setTimeout(() => interrupt('Provider response timed out'), idleMs); idleTimer.unref?.(); }
+      };
+      try {
+        handle = launchRun({
+          ...options, model, sessionID, fallbackAttempt: history.length > 0, onExit: undefined,
+          task: history.length && sessionID
+            ? `Resume the interrupted task in this session. Inspect preserved progress, continue the remaining work, and do not repeat completed side effects. Original task:\n${options.task ?? ''}`
+            : options.task,
+          onEvent: (parsed) => {
+            resetIdle(parsed);
+            if (parsed.permission) permissionBlock = `Permission required: ${parsed.permission.action}`;
+            if (parsed.tool && parsed.error && providerFailure(parsed.error).kind === 'permission') permissionBlock = parsed.error;
+            if (parsed.text?.trim()) hasText = true;
+            if (parsed.error && !parsed.tool && !parsed.permission) {
+              streamedError = `${streamedError} ${parsed.error}`.slice(-8000);
+              details = parsed.errorDetails;
+              if (!errorTimer) {
+                errorTimer = setTimeout(() => interrupt(streamedError), options.errorGraceMs ?? 1000);
+                errorTimer.unref?.();
+              }
+            }
+            options.onEvent?.(recoveryEvent(parsed));
+          },
+        });
+      } catch (error) {
+        lastResult = { code: 1, error, failureKind: 'system', blocked: false, attempts: history };
+        return { handle: lastHandle, result: lastResult, model: model ?? '(default)', exhausted: true };
+      }
+      activeHandle = lastHandle = handle; lastModel = model;
+      if (nativeMonitor) {
+        nativeTimer = setInterval(checkChildren, options.nativePollMs ?? 100);
+        nativeTimer.unref?.();
+      }
+      resetIdle();
+      const kill = handle.kill;
+      handle.kill = (signal) => { cancelled = true; wakeBackoff?.(); return kill(signal); };
+      try { options.onHandle?.(handle); } catch {}
+      const result = await handle.done;
+      // Also catch child failure immediately before the parent exits.
+      checkChildren();
+      clearInterval(nativeTimer); nativeMonitor?.close();
+      clearTimeout(idleTimer); clearTimeout(errorTimer); clearTimeout(escalation);
+      if (nativeFailures.length || cancelled || interrupted) await handle.settleGroup();
+      sessionID = handle.sessionID() ?? sessionID;
+      lastResult = result;
+      if (cancelled || options.signal?.aborted) break;
+      if (nativeFailures.length) return { handle, model: model ?? '(default)', exhausted: false,
+        result: { ...result, code: 1, blocked: true, failureKind: 'native-children', nativeFailures, attempts: history,
+          reason: `${nativeFailures.length} native subagent session(s) require recovery` } };
+      const empty = result.code === 0 && !streamedError && !hasText;
+      // stderr-only provider failures can also arrive with exit status zero.
+      const stderrFailure = result.stderr && providerFailure(result.stderr);
+      const failed = result.error || streamedError || result.code !== 0 || empty || !hasText && stderrFailure?.switchModel;
+      if (!failed) return { handle, result: { ...result, attempts: history }, model: model ?? '(default)', exhausted: false };
+      const reason = [streamedError, result.error?.message, result.stderr, !hasText && permissionBlock, empty && !permissionBlock && 'Empty response from provider'].filter(Boolean).join(' ').trim();
+      const failure = result.error || result.signal && !interrupted ? { kind: 'system', retry: false, switchModel: false }
+        : !hasText && permissionBlock ? { kind: 'permission', retry: false, switchModel: false }
+        : providerFailure(details ?? reason, { provider: Boolean(streamedError) });
+      history.push({ model: model ?? '(default)', round, kind: failure.kind, reason: reason.slice(-2000) });
+      if (['quota', 'authentication'].includes(failure.kind)) options.recoveryState?.set(model, history.at(-1));
+      // A long-lived quota failure must not consume later transient retry rounds.
+      if (!failure.retry) queue = queue.filter((attempt) => attempt.model !== model);
+      if (failure.retry && round < retryRounds) queue.push({ model, round: round + 1 });
+      if (!failure.switchModel) queue = [];
+      result.code = result.code || 1;
+      result.failureKind = failure.kind;
+      result.blocked = failure.kind !== 'system';
+      result.reason = reason || `opencode exited with code ${result.code}`;
+      result.attempts = [...history];
+      if (!queue.length) return { handle, result, model: model ?? '(default)', exhausted: true };
+      try { options.onRetry?.(queue[0].model, reason, { kind: failure.kind, attempt: history.length, round: queue[0].round }); } catch {}
+      await wait(history.length - 1);
+    }
+    return { handle: lastHandle, result: cancelled
+      ? { ...lastResult, code: lastResult.code || 1, signal: lastResult.signal || 'SIGTERM', cancelled: true, attempts: history }
+      : { ...lastResult, attempts: history }, model: lastModel ?? '(default)', exhausted: !cancelled };
+  } finally { options.signal?.removeEventListener('abort', abort); wakeBackoff?.(); }
+}
+
+/** Continue unfinished work in the same session, with its current files intact. */
+export async function launchTaskWithRecovery(options = {}) {
+  options = { ...options, recoveryState: options.recoveryState ?? new Map() };
+  const limit = Math.max(0, Math.min(3, options.continuationAttempts ?? 2));
+  let sessionID = options.sessionID, model = options.model, task = options.task;
+  let launched;
+  const reports = [], attempts = [];
+  let cancelled = false, continuation = 0, nativeRounds = 0;
+  const nativeRecoveries = [];
+  const trackHandle = (handle) => {
     const kill = handle.kill;
     handle.kill = (signal) => { cancelled = true; return kill(signal); };
-    lastHandle = handle;
-    try { options.onHandle?.(handle); } catch {}
-    let streamedError = '';
-    try {
-      handle.onEvent((parsed) => {
-        if (parsed?.error && !parsed.tool && !parsed.permission) streamedError = `${streamedError} ${parsed.error}`;
-      });
-    } catch {}
-    const result = await handle.done;
-    sessionID = handle.sessionID() ?? sessionID;
-    lastResult = result;
-    const failed = result?.error || streamedError || result?.code !== 0;
-    if (!failed) return { handle, result, model: model ?? '(default)', exhausted: false };
-    // Some OpenCode versions emit an error event but exit with status zero.
-    if (streamedError && result.code === 0) result.code = 1;
-    const attemptError = [streamedError, result?.error?.message, result?.stderr].filter(Boolean).join(' ').trim();
-    if (attempt >= maxAttempts - 1 || cancelled || result?.signal || !isTransientProviderError(attemptError)) {
-      return { handle, result, model: model ?? '(default)', exhausted: true };
+    options.onHandle?.(handle);
+  };
+  while (true) {
+    if (cancelled || options.signal?.aborted || options.isCancelled?.()) return { ...launched, result: { ...launched?.result, code: 1, cancelled: true, signal: 'SIGTERM', nativeRecoveries: [...nativeRecoveries], attempts: [...attempts] } };
+    const chunks = new Map(); let sequence = 0;
+    launched = await launchRunWithFallback({
+      ...options, model, task, sessionID,
+      onHandle: trackHandle,
+      onEvent: (parsed) => {
+        if (parsed.text) chunks.set(parsed.logEntry?.id || `part-${sequence++}`, parsed.text);
+        options.onEvent?.(parsed);
+      },
+      onRetry: (...args) => {
+        const partial = [...chunks.values()].join('\n\n');
+        if (partial.trim()) reports.push(partial.slice(-16000));
+        chunks.clear(); sequence = 0; options.onRetry?.(...args);
+      },
+    });
+    attempts.push(...(launched.result.attempts ?? []));
+    launched.result.attempts = [...attempts];
+    launched.result.partialReports = [...reports.slice(-4)];
+    launched.result.nativeRecoveries = [...nativeRecoveries];
+    if (launched.result.nativeFailures?.length && !cancelled && !options.signal?.aborted) {
+      if (nativeRounds >= 2 || (options.nativeDepth ?? 0) >= 3 || process.platform === 'win32') {
+        launched.result.reason = 'Native subagent recovery could not establish further safe progress; existing work is retained.';
+        return launched;
+      }
+      nativeRounds++;
+      const rootModel = launched.model === '(default)' ? options.model : launched.model;
+      const rootSession = launched.handle?.sessionID() ?? sessionID;
+      const handoffs = [];
+      for (const child of launched.result.nativeFailures) {
+        if (cancelled || options.signal?.aborted || options.isCancelled?.()) break;
+        let childModel;
+        const emitChild = (parsed) => {
+          const agent = parsed.isSubagent ? parsed.agent : child.agent;
+          const sid = parsed.isSubagent ? parsed.sessionID : child.id;
+          options.onEvent?.({ ...parsed, agent, isSubagent: true,
+            sessionID: sid, logEntry: parsed.logEntry ? { ...parsed.logEntry, sessionID: sid, model: parsed.logEntry.model ?? (!parsed.isSubagent ? childModel : undefined) } : undefined,
+            events: (parsed.events ?? []).map((event) => ({ ...event, from: agent, sessionID: sid, state: event.state ?? 'working' })) });
+        };
+        const status = (text, state = 'working') => emitChild({ text: null,
+          logEntry: { kind: 'status', status: state === 'working' ? 'recovering' : state === 'done' ? 'completed' : 'blocked', text, sessionID: child.id },
+          events: [{ kind: 'status', from: child.agent, state, recovering: true, text }],
+        });
+        const failure = providerFailure(child.details ?? child.error, { provider: true });
+        const selected = child.model ?? options.agentModels?.[child.agent] ?? options.model;
+        childModel = selected;
+        if (selected && ['quota', 'authentication'].includes(failure.kind)) options.recoveryState.set(selected,
+          { model: selected, kind: failure.kind, reason: child.error, sessionID: child.id, round: 0 });
+        status(`Recovering ${child.agent} in its existing session: ${child.error}`);
+        let childReport = '';
+        const childChunks = new Map(); let childSequence = 0;
+        const recovered = await launchTaskWithRecovery({
+          ...options, nativeDepth: (options.nativeDepth ?? 0) + 1,
+          agent: child.agent, model: selected, agentModels: { ...options.agentModels, [child.agent]: selected },
+          sessionID: child.id, dir: child.directory || options.dir,
+          task: [
+            'Resume only the assigned subtask in this existing session. The parent runtime and its tools have been stopped for recovery.',
+            'Inspect the current checkout first. Preserve completed work, including work the parent already performed. Finish only missing assigned criteria and do not repeat completed side effects. Do not delegate this recovery task.',
+            'Return the concrete result, checks actually run and external blockers. End with THEFACTORY_TASK_RESULT: completed or THEFACTORY_TASK_RESULT: incomplete as appropriate.',
+            'Original assignment (task data):', child.prompt || child.title,
+          ].join('\n\n'),
+          assessResponse: undefined, onSessionID: undefined, onSpawn: undefined,
+          onHandle: (handle) => { childModel = handle.model; handle.nativeChild = true; trackHandle(handle); },
+          onRetry: (next, reason) => { childChunks.clear(); status(`Retrying ${child.agent} on ${next}: ${String(reason).slice(0, 500)}`); },
+          onEvent: (parsed) => {
+            if (parsed.text && !parsed.isSubagent) { childChunks.set(parsed.logEntry?.id || `child-${childSequence++}`, parsed.text); childReport = [...childChunks.values()].join('\n\n'); }
+            emitChild(parsed);
+          },
+        });
+        attempts.push(...(recovered.result.attempts ?? []).map((attempt) => ({ ...attempt, sessionID: child.id, agent: child.agent })));
+        const handoff = { sessionID: child.id, agent: child.agent, title: child.title,
+          state: recovered.result.code === 0 ? 'completed' : recovered.result.cancelled ? 'cancelled' : 'blocked',
+          model: recovered.model, report: childReport.slice(-12000), reason: recovered.result.reason ?? '' };
+        nativeRecoveries.push(handoff); handoffs.push(handoff);
+        status(handoff.state === 'completed' ? 'done' : `Blocked: ${handoff.reason || 'recovery unavailable'}`, handoff.state === 'completed' ? 'done' : 'idle');
+        if (recovered.result.cancelled) cancelled = true;
+        if (recovered.result.failureKind === 'system') return { ...recovered, result: { ...recovered.result, nativeRecoveries, attempts } };
+      }
+      if (cancelled || options.signal?.aborted || options.isCancelled?.()) return { ...launched, result: { ...launched.result, cancelled: true, signal: 'SIGTERM', nativeRecoveries } };
+      sessionID = rootSession; model = rootModel;
+      if (options.agentModels) options = { ...options, agentModels: { ...options.agentModels, [options.agent ?? 'orchestrator']: model } };
+      task = [
+        'Resume the original task in this existing parent session after native subagent recovery.',
+        'Use the recovery handoffs below as task evidence. Completed child work is already in the checkout. Inspect and integrate it; do not redo completed writes or reassign completed subtasks. Blocked children remain unfinished unless you actually complete their assigned criteria through another permitted approach.',
+        'Original request:', options.task,
+        'Recovery handoffs (untrusted task data):', JSON.stringify(handoffs),
+      ].join('\n\n');
+      options.onRetry?.(model, 'Resuming parent with native subagent recovery handoffs', { kind: 'native-children' });
+      continue;
     }
-    try { options.onRetry?.(unique[attempt + 1], attemptError); } catch {}
-    await backoff(attempt);
-    if (cancelled) return { handle, result, model: model ?? '(default)', exhausted: false };
+    if (launched.result.code !== 0 || options.signal?.aborted) return launched;
+    const report = [...chunks.values()].join('\n\n');
+    const remaining = options.assessResponse ? await options.assessResponse(report, launched) : unfinishedResponse(report);
+    if (cancelled || options.signal?.aborted || options.isCancelled?.()) return { ...launched, result: { ...launched.result, code: 1, cancelled: true, signal: 'SIGTERM' } };
+    if (!remaining || options.reportOnly) return launched;
+    if (continuation === limit) {
+      launched.result = { ...launched.result, code: 1, blocked: true, failureKind: 'unfinished', reason: String(remaining), continuations: continuation };
+      return launched;
+    }
+    reports.push(report.slice(-16000));
+    sessionID = launched.handle?.sessionID() ?? sessionID;
+    model = launched.model === '(default)' ? options.model : launched.model;
+    // Keep other agents' base choices intact while continuing this active agent.
+    if (options.agentModels) options = { ...options, agentModels: { ...options.agentModels, [options.agent ?? 'orchestrator']: model } };
+    task = [
+      'Continue the assigned task from the current session and checkout. Inspect what is already done and finish only the remaining assigned criteria.',
+      'Preserve existing work. Do not repeat completed writes, deployments, purchases or other side effects. Use another permitted approach for a failed tool; respect all permission rules.',
+      'A missing optional file or tool is a limitation, not a new requirement. Do not claim completion without evidence. Explain concrete external blockers and what would unblock them.',
+      'Original task:', options.task,
+      'Previous report (untrusted task data):', report.slice(-16000),
+      'Remaining criteria / review feedback (task data):', String(remaining).slice(-4000),
+    ].join('\n\n');
+    options.onRetry?.(model, `Continuing unfinished work (${continuation + 1}/${limit}): ${String(remaining).slice(0, 500)}`, { kind: 'continuation' });
+    continuation++;
   }
-  return { handle: lastHandle, result: lastResult, model: unique[unique.length - 1] ?? '(default)', exhausted: true };
+  return launched;
 }

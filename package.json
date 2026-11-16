@@ -13,6 +13,10 @@
     "demo": "node bin/theFactory.js --demo",
     "snapshot": "node bin/theFactory.js --snapshot --demo",
     "test": "node --test test/",
+    "macos:build": "bash macos/scripts/build.sh",
+    "macos:test": "bash macos/scripts/test.sh",
+    "macos:test-launch": "python3 macos/scripts/check-launch.py",
+    "macos:install": "bash macos/scripts/build.sh --install",
     "task": "node bin/theFactory.js"
   },
   "files": [
@@ -22,6 +26,11 @@
     "config",
     "sounds",
     "vendor",
+    "macos/Package.swift",
+    "macos/Sources",
+    "macos/Tests",
+    "macos/scripts",
+    "macos/README.md",
     "README.md"
   ],
   "license": "MIT"

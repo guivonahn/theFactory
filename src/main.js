@@ -6,8 +6,10 @@
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import * as readlinePromises from 'node:readline/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { App } from './app.js';
+import { startMenuBarPublisher } from './menuBar.js';
+import { readMenuLaunchRequest } from './menuLaunch.js';
 import { AGENT_ORDER } from './agents.js';
 import { truncate } from './canvas.js';
 import { demoEvents, playDemo } from './demo.js';
@@ -15,7 +17,9 @@ import { LineInput } from './input.js';
 import { LiveSource, listRootSessions } from './live.js';
 import { startGoUsagePoller } from './goUsage.js';
 import { MIN_HEIGHT, MIN_WIDTH } from './layout.js';
-import { launchRun, launchRunWithFallback } from './run.js';
+import { launchRunWithFallback, launchTaskWithRecovery } from './run.js';
+import { applySubagentEvent } from './runEvents.js';
+import { listSessionGroups, registerSession, resolveSessionGroup, sessionGroupContext, sessionGroupHistory } from './sessionGroups.js';
 import { runTasks, scopesConflict } from './scheduler.js';
 import { createWorkerManager, completedWorker } from './worker.js';
 import {
@@ -68,6 +72,7 @@ Usage:
   thefactory --list                  list root sessions and exit
 
 Flags:
+  --picker               open the grouped theFactory conversation selector
   --attach <id|slug>     alias for --session (task and live modes)
   --session <id|slug>    select/continue a session by exact id, id prefix, or slug
                          (task mode: pass --session to opencode run + persist it;
@@ -114,8 +119,8 @@ Flags:
 
 Task-mode composer commands (typed instead of a task):
   /new                   forget the current session; next task starts a new one
-  /sessions              list recent root sessions (pick one, then /resume <id|#n>)
-  /resume <id|#n>        continue that session on the next task
+  /sessions              open grouped conversations and their agent sessions
+  /resume [id|#n]        open the selector, or resume the validated parent conversation
   /fallback [list]       show/set quota fallback models (comma-separated, max 8; /fallback clear to reset)
   /models                list OpenCode Go models available for fallback
   /volume [0-100|mute|on|off|+n|-n]
@@ -249,6 +254,11 @@ export function cycleConfigValue(options, key, dir = 1, memory = {}) {
 
 /** Parse the small, dependency-free flag set. */
 export function parseArgs(argv) {
+  const launchIndex = argv.indexOf('--launch-request');
+  if (launchIndex !== -1) {
+    if (launchIndex !== 0 || argv.length !== 2) throw new Error('--launch-request expects exactly one request file');
+    return { ...parseArgs([]), ...readMenuLaunchRequest(argv[1]) };
+  }
   const options = {
     mode: null,
     snapshot: null,
@@ -280,6 +290,7 @@ export function parseArgs(argv) {
     task: null,
     help: false,
     version: false,
+    modelCatalog: false,
     nolimit: null,
     resume: null,
     fallbackModels: [],
@@ -307,6 +318,7 @@ export function parseArgs(argv) {
     else if (arg === '--new' || arg === '--fresh') options.fresh = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg === '--version' || arg === '-v') options.version = true;
+    else if (arg === '--model-catalog') options.modelCatalog = true;
     else if (arg === 'nolimit') {
       const next = argv[index + 1];
       if (next && !next.startsWith('-')) {
@@ -489,7 +501,8 @@ function sessionTable(sessions, numbered = false) {
 }
 
 function runList(options) {
-  const sessions = listRootSessions({ dir: options.dir, limit: 30 });
+  const groups = listSessionGroups({ dir: options.dir, limit: 30 });
+  const sessions = groups.map((g) => ({ id: g.id, slug: g.slug, title: g.title, agent: 'orchestrator', child_count: g.childCount }));
   if (sessions.length === 0) {
     process.stdout.write('No root sessions found.\n');
     return 0;
@@ -648,8 +661,9 @@ async function runTui(mode, options) {
         : `! profile ${options.profile} · ${applied.error ?? 'apply failed'}`);
     }
     if (requestedModel) customizeModel(options, 'model', requestedModel);
+    for (const [agent, model] of Object.entries(options.menuAgentModels || {})) customizeModel(options, agent, model);
     syncModelRouting(options, baseProfile(options) === 'free' ? FREE_FALLBACK_MODELS : GO_MODEL_IDS);
-    if (options.profileExplicit || options.modelExplicit || !savedProfile && Object.keys(legacyModels).length) {
+    if (options.profileExplicit || options.modelExplicit || Object.keys(options.menuAgentModels || {}).length || !savedProfile && Object.keys(legacyModels).length) {
       const saved = saveProfileConfig(options);
       if (!saved.ok) app.addLog(`! ${saved.error}`);
     }
@@ -676,14 +690,14 @@ async function runTui(mode, options) {
   let restored = false;
   let screenEntered = false;
   let fatal = null;
+  let menuBarPublisher = null;
   let activeRun = null;
   let preparingRun = false;
   let abortRequested = false;
-  let hadPermissionFailure = false;
-  let permissionFailureMessage = '';
   let steerArmed = false;
   let steerText = '';
   let steerRun = null;
+  let steerSequence = 0;
   // SGR mouse reporting is opt-in: while enabled, most terminals route mouse
   // events to the app instead of native click-drag selection, which breaks
   // copying text out of the terminal. Toggle with --mouse or the m key.
@@ -714,12 +728,26 @@ async function runTui(mode, options) {
   // Persistent session: --session wins, --new/--fresh ignores the file,
   // otherwise resume the persisted id when its dir matches.
   let currentSessionID = null;
+  let resumeContextPending = '';
+  let sessionsSnapshot = [];
   if (mode === 'task') {
     if (options.session) {
       currentSessionID = options.session;
     } else if (!options.fresh) {
       const persisted = loadPersistedSession({ dir: options.dir });
       if (persisted) currentSessionID = persisted.sessionID;
+    }
+    if (currentSessionID) {
+      try {
+        const group = resolveSessionGroup(currentSessionID);
+        currentSessionID = group.id;
+        options.dir = group.directory || options.dir;
+        resumeContextPending = sessionGroupContext(group);
+        app.setSession(group.id, group.title);
+      } catch (error) {
+        app.addLog(`Saved session unavailable: ${error.message} Use /sessions.`);
+        currentSessionID = null;
+      }
     }
     if (currentSessionID && !options.fresh) {
       savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
@@ -1010,11 +1038,13 @@ async function runTui(mode, options) {
     try { out.write('\x1b[?2004l'); } catch {}
     if (renderTimer) clearInterval(renderTimer);
     if (pollTimer) clearInterval(pollTimer);
+    menuBarPublisher?.close();
     goUsagePoller.stop();
     if (killTimer) clearTimeout(killTimer);
     if (attachTimer) clearTimeout(attachTimer);
     stopFormPolling();
     activeRun?.kill('SIGTERM');
+    steerRun?.kill('SIGTERM');
     activeRun = null;
     demoHandle?.stop();
     source?.close();
@@ -1104,6 +1134,7 @@ async function runTui(mode, options) {
   };
 
   const handleParsed = (parsed) => {
+    if (applySubagentEvent(app, parsed)) return;
     if (parsed.sessionID) {
       app.setAgentRuntime('orchestrator', { sessionID: parsed.sessionID });
       currentSessionID = parsed.sessionID;
@@ -1132,8 +1163,6 @@ async function runTui(mode, options) {
       const pattern = parsed.permission.pattern ?? '';
       const label = `⚠ permission requested: ${action}${pattern ? ` (${pattern})` : ''}`;
       app.addLog(label);
-      hadPermissionFailure = true;
-      permissionFailureMessage = label;
       const alreadyApplied = (parsed.events ?? []).some((event) => event?.text === label);
       if (!alreadyApplied) {
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: label });
@@ -1144,10 +1173,8 @@ async function runTui(mode, options) {
       app.addLog(parsed.diff);
     }
     if (parsed.error) {
-      // Mid-run tool/runtime errors land here before any terminal finishRun,
-      // and some carry no ✗ status (plain ⚠), so cue explicitly. The player
-      // throttles duplicates with the finishRun error cue.
-      try { soundPlayer.play('error'); } catch {}
+      // Terminal system errors are reported by finishTask. Recoverable tool
+      // and provider errors arrive as recovery events from the shared launcher.
       const rawError = String(parsed.error);
       const denied = /permission denied/i.test(rawError);
       if (denied) {
@@ -1157,14 +1184,8 @@ async function runTui(mode, options) {
         // "⚠ permission denied: Permission denied: ...".
         const detail = rawError.replace(/^\s*permission denied:\s*/i, '');
         app.addLog(`⚠ permission denied: ${truncate(detail, 100)}`);
-        hadPermissionFailure = true;
-        permissionFailureMessage = truncate(rawError, 100);
       } else {
         app.addLog(`! ${truncate(rawError, 100)}`);
-        if (/tool execution interrupted|permission requested/i.test(rawError)) {
-          hadPermissionFailure = true;
-          permissionFailureMessage = truncate(rawError, 100);
-        }
       }
     }
   };
@@ -1198,7 +1219,14 @@ async function runTui(mode, options) {
       0,
       Math.floor((app.now - app.run.startedAt) / 1000),
     );
-    if (result.error) {
+    if (abortRequested || result.cancelled) {
+      app.finishRun('aborted');
+      app.addLog('■ task cancelled; completed work is retained');
+    } else if (result.blocked) {
+      const message = result.reason || 'No configured recovery route is currently available';
+      app.finishRun('blocked', message);
+      app.addLog(`⊘ ${message}`, { kind: 'status' });
+    } else if (result.error) {
       const rawMessage = String(result.error?.message ?? result.error);
       const message =
         result.error?.code === 'ENOENT' || /ENOENT/.test(rawMessage)
@@ -1209,25 +1237,12 @@ async function runTui(mode, options) {
       app.addLog(`reason: ${truncate(message, 108)}`);
       app.addLog(`! ${truncate(message, 110)}`);
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
-    } else if (abortRequested) {
-      app.finishRun('aborted');
-      app.addLog('═══ FAILED TASK REPORT ═══');
-      app.addLog('reason: task aborted by user');
-      app.addLog(`■ aborted after ${elapsed}s`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: '■ FAILED TASK REPORT · aborted' });
-    } else if (result.code === 0 && hadPermissionFailure) {
-      const message = permissionFailureMessage || 'permission denied — see log';
-      app.finishRun('error', message);
-      app.addLog('═══ FAILED TASK REPORT ═══');
-      app.addLog(`reason: ${truncate(message, 108)}`);
-      app.addLog(`! ${truncate(message, 110)}`);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ FAILED TASK REPORT · ${truncate(message, 70)}` });
     } else if (result.code === 0 && app.promptTasks.some((task) => task.state !== 'completed')) {
       const count = app.promptTasks.filter((task) => task.state !== 'completed').length;
-      app.finishRun('error', `${count} planned step(s) remain unfinished`);
+      app.finishRun('blocked', `${count} planned step(s) remain unfinished`);
       app.addLog(`! ${count} planned step(s) remain unfinished; see the overview`);
     } else if (result.code === 0 && unfinishedRecap(lastText)) {
-      app.finishRun('error', truncate(unfinishedRecap(lastText), 120));
+      app.finishRun('blocked', truncate(unfinishedRecap(lastText), 120));
       app.addLog('! The orchestrator reported unfinished work; see the overview.');
     } else if (result.code === 0) {
       const detail = lastText.trim();
@@ -1296,10 +1311,16 @@ async function runTui(mode, options) {
    * report conflicts and persist state for /resume. Never a silent success —
    * every worker outcome is logged and surfaced on the agent pillars.
    */
-  const launchParallelRun = async (objective, token, graphifyGuide = null) => {
+  const launchParallelRun = async (objective, token, graphifyGuide = null, resumeContext = '') => {
     const concurrency = options.sequential ? 1 : (options.workers ?? 3);
     const runId = `run_${Date.now()}`;
     const controller = new AbortController();
+    let groupRootID = currentSessionID;
+    const recordSession = (sessionID, role, kind) => {
+      groupRootID ||= sessionID;
+      registerSession({ groupID: runId, rootSessionID: groupRootID, sessionID, role, kind,
+        dir: options.dir || process.cwd(), title: objective });
+    };
 
     // --- Phase 1: plan (fresh session so the plan is unpolluted).
     app.applyEvent({
@@ -1334,9 +1355,19 @@ async function runTui(mode, options) {
       let plannerLaunched;
       plannerHandle = null;
       plannerLaunched = launchRunWithFallback({
+        agent: 'orchestrator',
+        sessionID: groupRootID,
+        onSessionID: (id) => {
+          recordSession(id, 'orchestrator', 'planner');
+          currentSessionID = groupRootID;
+          savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+          app.setSession(currentSessionID, objective.slice(0, 100));
+          if (resumeContextPending === resumeContext) resumeContextPending = '';
+        },
         agentModels: effectiveAgentModels(options),
         autoFallback: options.autoFallback,
-        task: buildPlanningPrompt(objective, {
+        recoveryState: options.recoveryState,
+        task: buildPlanningPrompt(resumeContext ? `${resumeContext}\n\nCurrent user request:\n${objective}` : objective, {
           maxTasks: Math.max(2, Math.min(8, concurrency * 2)),
           sequential: Boolean(options.sequential),
           skills: skillRegistry,
@@ -1352,9 +1383,12 @@ async function runTui(mode, options) {
         onHandle: (h) => {
           plannerHandle = h;
           app.setAgentRuntime('orchestrator', { model: h.model });
-          for (const [agent, model] of Object.entries(h.agentModels)) app.setAgentRuntime(agent, { model });
+          for (const [agent, model] of Object.entries(h.agentModels)) {
+              if (agent === h.agent || !app.agentRuntime.get(agent)?.sessionID) app.setAgentRuntime(agent, { model });
+            }
         },
         onRetry: (nextModel, reason) => {
+          planChunks.length = 0;
           if (token !== runToken || stopped) return;
           if (!usesCoarena(options) && !hasAgentModels(options)) {
             try { applyModelToAllAgents(nextModel); fallbackSwitched = true; } catch {}
@@ -1366,8 +1400,8 @@ async function runTui(mode, options) {
       const planResult = await plannerLaunched;
       plannerHandle = null;
       if (stopped || token !== runToken) return;
-      if (planResult.result?.code !== 0 && !planChunks.length) {
-        throw new Error(`planner run failed: ${planResult.result?.error?.message ?? `exit ${planResult.result?.code}`}`);
+      if (planResult.result?.code !== 0) {
+        throw new Error(`planner run failed: ${planResult.result?.reason ?? planResult.result?.error?.message ?? `exit ${planResult.result?.code}`}`);
       }
       try {
         plan = parsePlan(planChunks.join('\n'));
@@ -1408,10 +1442,14 @@ async function runTui(mode, options) {
       coarena: usesCoarena(options),
       agentModels: effectiveAgentModels(options),
       autoFallback: options.autoFallback,
+      recoveryState: options.recoveryState,
+      signal: controller.signal,
+      nativeRecovery: true,
       dir: options.dir,
       bin: options.opencode,
       auto: options.auto,
       graphifyGuide,
+      onRelatedSession: ({ sessionID, role, kind }) => recordSession(sessionID, role, kind),
     });
     const taskById = new Map(plan.map((t) => [t.id, t]));
     const agentOf = (taskId) => taskById.get(taskId)?.agent ?? 'other';
@@ -1423,7 +1461,8 @@ async function runTui(mode, options) {
 
     const offBus = manager.bus.onEvent((evt) => {
       if (token !== runToken || stopped) return;
-      const agent = agentOf(evt.taskId);
+      const agent = evt.meta?.agent ?? agentOf(evt.taskId);
+      if (evt.kind === 'session' && evt.sessionId) recordSession(evt.sessionId, agent, 'worker');
       if (evt.meta?.model) app.setAgentRuntime(agent, { model: evt.meta.model });
       if (evt.sessionId) app.setAgentRuntime(agent, { sessionID: evt.sessionId });
       const task = taskById.get(evt.taskId);
@@ -1443,19 +1482,22 @@ async function runTui(mode, options) {
         // msg-in flips the pillar back to "working"; settle it explicitly so
         // the ACTIVE AGENTS panel drops it when the task is finished.
         app.applyEvent({ kind: 'status', from: agent, text: 'done', state: 'done' });
-      } else if (evt.kind === 'failed' || evt.kind === 'cancelled') {
+      } else if (evt.kind === 'failed' || evt.kind === 'cancelled' || evt.kind === 'blocked') {
         refreshPanel();
         const record = manager.workers.get(evt.workerId);
         const detail = truncate(String(record?.error ?? evt.text ?? evt.kind), 90);
-        app.addLog(`✗ ${agent}: ${detail}`);
-        app.applyEvent({ kind: 'status', from: agent, text: `✗ ${detail}`, state: 'idle' });
+        const icon = evt.kind === 'failed' ? '✗' : evt.kind === 'blocked' ? '⊘' : '■';
+        app.addLog(`${icon} ${agent}: ${detail}`);
+        app.applyEvent({ kind: 'status', from: agent, text: `${icon} ${detail}`, state: 'idle', recovering: evt.kind !== 'failed' });
       } else if (evt.kind === 'tool') {
-        app.applyEvent({ kind: 'tool', from: agent, text: evt.text, logRecorded: evt.meta?.logRecorded });
+        app.applyEvent({ kind: 'tool', from: agent, text: evt.text, sessionID: evt.sessionId, logRecorded: evt.meta?.logRecorded });
       } else if (evt.kind === 'permission') {
         app.addLog(`⚠ ${agent}: permission requested — see --auto or allow rules`);
       } else if (evt.kind === 'status') {
         // Carries an indented diff preview for edit/write tools.
         if (!evt.meta?.logRecorded) app.recordAgentLog(agent, { kind: 'status', text: evt.text });
+        if (evt.meta?.state) app.applyEvent({ kind: 'status', from: agent, text: evt.text, state: evt.meta.state,
+          recovering: evt.meta.recovering, sessionID: evt.sessionId, logRecorded: true });
       }
       // 'started'/'session'/'failure' are logged implicitly via panel updates;
       // keep the log feed focused on outcomes.
@@ -1518,6 +1560,7 @@ async function runTui(mode, options) {
     const persistParallel = (overview = null, synthesized = false) => { try {
       saveParallelState(options.dir || process.cwd(), {
         runId,
+        rootSessionID: groupRootID,
         objective,
         sequential: Boolean(options.sequential),
         tasks: plan.map((task) => ({ ...task, ...taskSnapshot.find((item) => item.id === task.id) })),
@@ -1535,7 +1578,7 @@ async function runTui(mode, options) {
     const doneCount = counts.completed;
     const badCount = counts.failed + counts.cancelled;
     const blockedCount = taskSnapshot.filter((task) => task.state === 'blocked').length;
-    const outcome = controller.signal.aborted ? 'aborted' : planFailed || badCount > 0 || blockedCount > 0 ? 'error' : 'done';
+    const outcome = controller.signal.aborted ? 'aborted' : planFailed || badCount > 0 ? 'error' : blockedCount > 0 ? 'blocked' : 'done';
     const data = buildOverviewData({
       objective, state: outcome, tasks: plan.map((task) => ({ ...task, ...taskSnapshot.find((item) => item.id === task.id) })),
       workers: [...manager.workers.values()], detail: [schedulerError, plannerWarn && `Planner fallback: ${plannerWarn}`].filter(Boolean).join('\n'),
@@ -1545,8 +1588,9 @@ async function runTui(mode, options) {
       app.runPhase = 'recap';
       app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'writing overview: completed work, unfinished items and verification' });
       overview = await synthesizeOverview(data, {
+        onSessionID: (id) => recordSession(id, 'orchestrator', 'overview'),
         signal: controller.signal, model: options.model, agentModels: effectiveAgentModels(options),
-        fallbackModels: options.fallbackModels ?? [], autoFallback: options.autoFallback,
+        fallbackModels: options.fallbackModels ?? [], autoFallback: options.autoFallback, recoveryState: options.recoveryState,
         coarena: usesCoarena(options), dir: options.dir, bin: options.opencode,
         onHandle: (handle) => { overviewHandle = handle; app.setAgentRuntime('orchestrator', { model: handle.model }); },
       });
@@ -1562,8 +1606,9 @@ async function runTui(mode, options) {
       app.addLog('■ parallel run aborted; queued tasks were not launched');
     } else if (planFailed || badCount > 0 || blockedCount > 0) {
       const message = `parallel run: ${doneCount} completed, ${badCount} failed/cancelled, ${blockedCount} blocked`;
-      app.finishRun('error', message);
-      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `✗ ${message}` });
+      const systemFailure = planFailed || counts.failed > 0;
+      app.finishRun(systemFailure ? 'error' : 'blocked', message);
+      app.applyEvent({ kind: 'status', from: 'orchestrator', text: `${systemFailure ? '✗' : '⊘'} ${message}`, recovering: !systemFailure });
       for (const record of manager.workers.values()) if (record.state === 'failed') {
         app.addLog(`${record.taskId} (${record.role}): ${record.error || 'failed; see worker log'}`, { kind: 'error' });
       }
@@ -1587,7 +1632,52 @@ async function runTui(mode, options) {
     app.setInputValue(lineInput?.value ?? '');
   };
 
-  const startTask = async (raw) => {
+  const openSessionSelector = ({ allProjects = false, query = '' } = {}) => {
+    try {
+      sessionsSnapshot = listSessionGroups({ dir: allProjects ? undefined : options.dir || process.cwd() });
+      app.openSessions(sessionsSnapshot, { currentID: currentSessionID, allProjects });
+      app.sessionPicker.query = query;
+    } catch (error) {
+      app.openSessions([], { currentID: currentSessionID, allProjects });
+      app.sessionPicker.error = `Cannot load sessions: ${error.message}`;
+    }
+  };
+
+  const resumeConversation = (group) => {
+    if (activeRun || preparingRun) {
+      app.sessionPicker.error = 'A task is running. Finish or cancel it before resuming.';
+      return false;
+    }
+    try {
+      const selected = resolveSessionGroup(group.id);
+      if (selected.directory) {
+        try { if (!statSync(selected.directory).isDirectory()) throw new Error(); }
+        catch { throw new Error(`Project folder is unavailable: ${selected.directory}`); }
+      }
+      const context = sessionGroupContext(selected);
+      const history = sessionGroupHistory(selected);
+      stopFormPolling();
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (attachTimer) { clearTimeout(attachTimer); attachTimer = null; }
+      source?.close(); source = null;
+      currentSessionID = selected.id;
+      options.dir = selected.directory || options.dir;
+      resumeContextPending = context;
+      lastText = ''; responseParts.clear();
+      app.selectConversation(selected);
+      applyBackfillQuiet(history);
+      savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
+      app.updateConfigInfo(configSnapshot());
+      app.addLog(`Resumed ${selected.title} with ${selected.childCount} grouped agent session(s). Enter your next request.`);
+      return true;
+    } catch (error) {
+      app.sessionPicker.error = error.message;
+      app.addLog(`Resume unavailable: ${error.message}`);
+      return false;
+    }
+  };
+
+  const startTask = async (raw, { literal = false } = {}) => {
     const rawValue = String(raw ?? '');
     // Preserve the prompt byte-for-byte except outer whitespace for emptiness check.
     // Inner newlines, indentation, Unicode are untouched.
@@ -1599,7 +1689,7 @@ async function runTui(mode, options) {
     }
     // Slash commands are handled before launching (and before touching the
     // run lifecycle), so they never spawn `opencode run`.
-    if (task.startsWith('/')) {
+    if (!literal && task.startsWith('/')) {
       lineInput?.reset();
       app.setInputValue('');
       const [command, ...rest] = task.split(/\s+/);
@@ -1644,61 +1734,26 @@ async function runTui(mode, options) {
         return;
       }
       if (command === '/new' || command === '/fresh') {
-        currentSessionID = null;
+        currentSessionID = null; resumeContextPending = '';
         clearPersistedSession();
         app.setSession(null);
         app.addLog('fresh session — next task starts a new session');
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'fresh session — next task starts a new session' });
         return;
       }
-      if (command === '/sessions') {
-        try {
-          const sessions = listRootSessions({ dir: options.dir, limit: 12 });
-          if (sessions.length === 0) {
-            app.addLog('no root sessions found');
-          } else {
-            app.addLog('sessions (latest first):');
-            sessions.forEach((session, index) => {
-              const marker = currentSessionID && session.id === currentSessionID ? ' *current*' : '';
-              app.addLog(`${index + 1}. ${truncate(session.id.slice(0, 20), 20)} · ${truncate(session.title || session.slug || '', 60)}${marker}`);
-            });
-            app.addLog('use /resume <id|#n> to continue one');
-          }
-          app.applyEvent({ kind: 'status', from: 'orchestrator', text: `sessions listed (${sessions.length}) · /resume to pick` });
-        } catch (error) {
-          const message = error?.message ?? String(error);
-          app.addLog(`! sessions: ${truncate(message, 90)}`);
-        }
+      if (command === '/sessions' || command === '/resume' && !rest.length) {
+        openSessionSelector();
         return;
       }
       if (command === '/resume') {
         const token = rest.join(' ').trim();
-        if (!token) {
-          app.addLog('! usage: /resume <id|#n>');
-          return;
-        }
-        let nextID = token;
-        if (/^\d+$/.test(token)) {
-          try {
-            const sessions = listRootSessions({ dir: options.dir, limit: 12 });
-            const index = Number.parseInt(token, 10) - 1;
-            if (sessions[index]) nextID = sessions[index].id;
-          } catch (error) {
-            const message = error?.message ?? String(error);
-            app.addLog(`! resume lookup: ${truncate(message, 90)}`);
-            return;
-          }
-        }
-        currentSessionID = nextID;
-        savePersistedSession({ sessionID: currentSessionID, dir: options.dir });
-        app.setSession(currentSessionID);
         try {
-          const sessions = listRootSessions({ dir: options.dir, limit: 50 });
-          const found = sessions.find((s) => s.id === currentSessionID);
-          if (found) app.setSession(currentSessionID, found.title || found.slug);
-        } catch {}
-        app.addLog(`resume set: ${truncate(currentSessionID, 60)}`);
-        app.applyEvent({ kind: 'status', from: 'orchestrator', text: `resume set: ${truncate(currentSessionID, 50)}` });
+          const groups = /^#?\d+$/.test(token)
+            ? sessionsSnapshot.length ? sessionsSnapshot : listSessionGroups({ dir: options.dir || process.cwd() }) : undefined;
+          resumeConversation(resolveSessionGroup(token, { groups }));
+        } catch (error) {
+          app.addLog(`Resume unavailable: ${error.message}`);
+        }
         return;
       }
       if (command === '/config') {
@@ -1754,8 +1809,7 @@ async function runTui(mode, options) {
     lastText = '';
     responseParts.clear();
     abortRequested = false;
-    hadPermissionFailure = false;
-    permissionFailureMessage = '';
+    options.recoveryState = new Map();
     runToken += 1;
     const token = runToken;
     const resumed = Boolean(currentSessionID);
@@ -1798,7 +1852,8 @@ async function runTui(mode, options) {
         return;
       }
     }
-    let launchTask = `${task}\n${skillsPrompt(skillRegistry)}`;
+    const resumeContext = resumeContextPending;
+    let launchTask = `${resumeContext ? `${resumeContext}\n\nCurrent user request:\n` : ''}${task}\n${skillsPrompt(skillRegistry)}`;
     let graphifyGuide = null;
     if (options.graphify) {
       const dir = options.dir || process.cwd();
@@ -1823,15 +1878,23 @@ async function runTui(mode, options) {
 
     // Parallel engine: plan + scheduler + independent workers (Phases 1–6).
     if (options.parallel || options.sequential) {
-      await launchParallelRun(task, token, graphifyGuide);
+      await launchParallelRun(task, token, graphifyGuide, resumeContext);
       return;
     }
 
     let handle;
     try {
-      const launched = await launchRunWithFallback({
+      const launched = await launchTaskWithRecovery({
+        agent: 'orchestrator',
+        nativeRecovery: true,
+        assessResponse: (report) => {
+          const unfinished = unfinishedRecap(report);
+          const pending = app.promptTasks.filter((task) => task.state !== 'completed');
+          return unfinished || (pending.length ? `${pending.length} planned steps remain unfinished. Inspect the todo list and complete or explain the remaining criteria.` : '');
+        },
         agentModels: effectiveAgentModels(options),
         autoFallback: options.autoFallback,
+        recoveryState: options.recoveryState,
         task: launchTask,
         registry: skillRegistry,
         skillText: task,
@@ -1847,6 +1910,7 @@ async function runTui(mode, options) {
         onSessionID: (id) => {
           if (token !== runToken || stopped) return;
           currentSessionID = id;
+          if (resumeContextPending === resumeContext) resumeContextPending = '';
           savePersistedSession({ sessionID: id, dir: options.dir });
           app.setRunSession(id);
           app.setSession(id);
@@ -1862,8 +1926,13 @@ async function runTui(mode, options) {
         },
         onHandle: (h) => {
           handle = h;
-          app.setAgentRuntime('orchestrator', { model: h.model });
-          for (const [agent, model] of Object.entries(h.agentModels)) app.setAgentRuntime(agent, { model });
+          if (h.nativeChild) app.setAgentRuntime(h.agent, { model: h.model });
+          else {
+            app.setAgentRuntime('orchestrator', { model: h.model });
+            for (const [agent, model] of Object.entries(h.agentModels)) {
+              if (agent === h.agent || !app.agentRuntime.get(agent)?.sessionID) app.setAgentRuntime(agent, { model });
+            }
+          }
           activeRun = h;
           if (h?.child?.pid) app.setRunPid(h.child.pid);
         },
@@ -1896,42 +1965,34 @@ async function runTui(mode, options) {
     }
   };
 
-  const steerTask = (text) => {
+  const steerTask = async (text) => {
     const value = String(text ?? '').trim();
     if (!value || !currentSessionID) return;
-    if (steerRun) {
-      try { steerRun.kill('SIGTERM'); } catch {}
-      steerRun = null;
-    }
+    const token = runToken, sequence = ++steerSequence;
+    steerRun?.kill('SIGTERM');
+    steerRun = null;
     app.addLog(`steering: ${truncate(value, 110)}`);
     app.applyEvent({ kind: 'status', from: 'orchestrator', text: `steering: ${truncate(value, 80)}` });
     try {
-      const handle = launchRun({
-        task: value,
-        model: effectiveAgentModels(options).orchestrator ?? options.model,
-        agentModels: effectiveAgentModels(options),
-        fallbackModels: options.fallbackModels ?? [],
-        auto: options.auto,
-        dir: options.dir,
-        bin: options.opencode,
-        sessionID: currentSessionID,
-        onEvent: (parsed) => {
-          if (token === runToken && !stopped) handleParsed(parsed);
+      const launched = await launchRunWithFallback({
+        agent: 'orchestrator',
+        task: value, model: effectiveAgentModels(options).orchestrator ?? options.model,
+        agentModels: effectiveAgentModels(options), fallbackModels: options.fallbackModels ?? [],
+        autoFallback: options.autoFallback, recoveryState: options.recoveryState,
+        auto: options.auto, dir: options.dir, bin: options.opencode, sessionID: currentSessionID,
+        onHandle: (handle) => {
+          if (sequence !== steerSequence || stopped || token !== runToken) { handle.kill('SIGTERM'); return; }
+          steerRun = handle;
         },
+        onEvent: (parsed) => { if (sequence === steerSequence && token === runToken && !stopped) handleParsed(parsed); },
+        onRetry: (model, reason) => { if (!stopped && token === runToken) app.addLog(`↻ steering on ${model}: ${truncate(reason, 80)}`); },
         onError: () => {},
       });
-      steerRun = handle;
-      if (handle?.child?.pid) app.addLog(`steer pid ${handle.child.pid}`);
-      handle.done.then((result) => {
-        steerRun = null;
-        if (token !== runToken || stopped) return;
-        if (result?.code !== 0 && !result?.error) {
-          app.addLog(`! steer exited ${result.code}`);
-        }
-      }).catch(() => { steerRun = null; });
+      if (sequence !== steerSequence || token !== runToken || stopped) return;
+      if (!launched.result.cancelled && launched.result.code !== 0) app.addLog(`${launched.result.blocked ? '⊘' : '!'} steering: ${launched.result.reason || launched.result.error?.message || 'process ended'}`);
     } catch (error) {
-      app.addLog(`! steer: ${truncate(error?.message ?? String(error), 90)}`);
-    }
+      if (sequence === steerSequence && token === runToken && !stopped) app.addLog(`! steer: ${truncate(error?.message ?? String(error), 90)}`);
+    } finally { if (sequence === steerSequence) steerRun = null; }
   };
 
   const onKey = (buffer) => {
@@ -1967,6 +2028,14 @@ async function runTui(mode, options) {
         const image = app.imageView.image;
         openExternal(image?.path ?? image?.url ?? image?.uri);
       } else if (text === '\x1b' || text === 'q' || text === 'Q') app.closeImage();
+      return;
+    }
+    if (app.sessionPicker.open) {
+      const action = app.handleSessionPickerKey(text);
+      if (action.action === 'quit') stop(0);
+      else if (action.action === 'close') app.sessionPicker.open = false;
+      else if (action.action === 'scope') openSessionSelector({ allProjects: action.allProjects, query: app.sessionPicker.query });
+      else if (action.action === 'resume') resumeConversation(action.group);
       return;
     }
     // Log overlay consumes keys first so Esc never aborts a run from inside it.
@@ -2014,6 +2083,9 @@ async function runTui(mode, options) {
       return;
     }
     if (mode === 'task') {
+      if ((text === '\r' || text === '\n') && ['/sessions', '/resume'].includes(lineInput.value.trim())) {
+        lineInput.reset(); app.setInputValue(''); openSessionSelector(); return;
+      }
       // `/log` opens the log viewer even while a task is running. Bare `l` is
       // no longer a shortcut here, so typing a task that starts with L works.
       if ((text === '\r' || text === '\n') && ['/log', '/overview'].includes(lineInput.value.trim())) {
@@ -2114,6 +2186,7 @@ async function runTui(mode, options) {
     // capture disables native text selection.
     try { out.write('\x1b[?2004h'); } catch {}
     if (options.mouse) setMouseEnabled(true);
+    if (options.openSessions) openSessionSelector();
     out.write(app.frame());
     input.on('data', onKey);
     process.on('SIGINT', onSigint);
@@ -2121,6 +2194,7 @@ async function runTui(mode, options) {
 
     let last = performance.now();
     if (!stopped) {
+      menuBarPublisher = startMenuBarPublisher(app, { directory: options.dir || process.cwd(), launchID: options.menuLaunchID });
       renderTimer = setInterval(() => {
         if (stopped) return;
         try {
@@ -2138,6 +2212,7 @@ async function runTui(mode, options) {
       if (mode === 'task') {
         app.addLog('ready · type a task below');
         app.applyEvent({ kind: 'status', from: 'orchestrator', text: 'ready · type a task below' });
+        if (options.start && options.task) void startTask(options.task, { literal: true });
       } else if (mode === 'demo' && (options.workerPreview || options.factoryPreview)) {
         // The audition is a local, silent scene; the shared render clock animates it.
       } else if (mode === 'demo') {
@@ -2216,6 +2291,11 @@ async function runTui(mode, options) {
 /** CLI entry point. Returns the process exit code. */
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  if (options.modelCatalog) {
+    const { readModelCatalog } = await import('./modelCatalog.js');
+    process.stdout.write(`${JSON.stringify(readModelCatalog())}\n`);
+    return 0;
+  }
   if (options.help) {
     process.stdout.write(`${USAGE}\n`);
     return 0;
@@ -2246,6 +2326,7 @@ export async function main(argv = process.argv.slice(2)) {
   let mode = chooseMode(options, isTTY);
 
   if (mode === 'list') return runList(options);
+  if (mode === 'picker' && isTTY && options.snapshot == null) return runTui('task', { ...options, openSessions: true });
 
   if (mode === 'task' && (!isTTY || options.snapshot != null)) {
     process.stderr.write(

@@ -8,6 +8,11 @@ Packets travel between the centre box and each pillar while agents work. Run
 `thefactory` to type a task; it drives a real `opencode run` session and shows
 all subagent traffic live.
 
+On macOS, an optional native menu bar companion shows a small popover with live
+progress and animated workers. Choose a directory, configure agents and launch
+a prompt in Terminal directly from the popover. Build and open it with
+`npm run macos:install`. See [the menu bar guide](macos/README.md).
+
 ## Requirements
 
 - Node.js 22 or newer
@@ -171,8 +176,27 @@ configuration; project skills can override built-ins by name.
 Composer commands:
 
 ```
-/new  /sessions  /resume <id|#n>  /fallback  /models  /volume  /config  /log  /overview
+/new  /sessions  /resume [id|#n]  /fallback  /models  /volume  /config  /log  /overview
 ```
+
+`/sessions`, bare `/resume`, and `thefactory --picker` open the conversation
+browser. Each main conversation contains its native child sessions and deeper
+descendants. New Factory-managed runs also record their planner, independent
+workers, acceptance reviews and summary sessions as one conversation group.
+Older standalone sessions without recorded membership remain separate; grouping
+does not guess from similar titles or timestamps.
+
+Use ↑/↓ to choose, →/← to expand/collapse, type to search, Tab to switch between
+this project and all projects, and Enter to resume. Choosing a child resumes its
+main conversation. The browser shows recorded outcomes, restores per-agent logs,
+and supplies the child reports as bounded context for the next request. Browsing
+does not dispatch work; switching conversations is disabled during an active task.
+
+`/resume <id|slug|#n>` validates the selection and accepts parent or child IDs;
+numbers refer to the last displayed conversation list. Missing/ambiguous IDs and
+unavailable project folders leave the current conversation unchanged.
+The separate CLI flag `--resume <dir>` still prints the safe recovery plan from
+`parallel-state.json`; it never blindly reruns write tasks.
 
 `/config` opens an editable card for the model, profile, verbosity, fallbacks,
 auto-approve, parallelism, nolimit, graphify and sound volume settings.
@@ -254,8 +278,9 @@ private OpenCode process, including parallel workers, without saving keys or
 replacing the global agent lineup. Each new task probes Coarena again.
 
 `--model coarena/claude-fable-5-2` selects Fable with automatic keys. `--no-auto-fallback`
-disables automatic retries; `--fallback-models` supplies a custom list instead.
-Authentication/permission errors stop the run rather than triggering retries.
+disables the automatic model pool; `--fallback-models` supplies a custom list instead.
+Invalid provider credentials try the remaining configured routes. Tool permission
+rules remain enforced throughout recovery.
 
 Coarena documents its model IDs, Anthropic endpoint, and account limits in
 [its API docs](https://coarena.ai/docs). Two keys on the same account may share
@@ -275,6 +300,52 @@ failing. Toggle it in `/config` (`autoFallback` row) or with
 `--auto-fallback` / `--no-auto-fallback` (env `FACTORY_AUTO_FALLBACK=0`).
 Manual lists via `--fallback-models` / `/fallback` disable auto-fallback and
 use your list instead. Single runs and parallel workers both retry.
+
+Recovery is shared by planning, workers, acceptance review, steering and final
+summaries. It handles quota and billing limits, bad provider credentials,
+unavailable models, request/context incompatibilities, temporary service/network
+errors, and empty replies, including error events from a CLI that exits zero.
+Temporary failures get up to two additional rounds after the initial model pool,
+with bounded backoff. Quota and authentication failures are remembered for the
+current task so later workers skip those routes; every new user task probes again.
+The free profile stays within its free pool, and explicit model lists stay intact.
+
+A silent provider is interrupted after 180 seconds without a parsed event;
+active tool commands are exempt while running. Set
+`FACTORY_PROVIDER_IDLE_TIMEOUT_MS` to change this interval (`0` disables it).
+A process that reports a terminal provider error but hangs is terminated so the
+next configured route can take over. Cancellation also interrupts retry backoff.
+
+Unfinished agent reports get up to two continuation turns using the existing
+session and checkout, with instructions to preserve completed work and avoid
+repeating side effects. Investigation acceptance review still checks evidence
+before deciding whether continuation is needed. Retries clear stale response text
+from plans and summaries, while worker reports and recovery attempts are retained
+in `parallel-state.json`.
+
+When configured recovery options are exhausted, unavailable providers, permission
+requirements and unfinished criteria produce a **blocked** outcome with their
+cause. Dependents remain blocked and completed work stays recorded. Only process,
+configuration and scheduler faults produce a terminal system error. Ordinary tool
+errors are recovery events; agents are instructed to correct them or use another
+permitted approach. Recovery never marks unfinished work as completed.
+
+Native OpenCode subagents are supervised in task mode too. TheFactory observes
+fresh child-session outcomes through the read-only session database. Once sibling
+subagents have settled, a failed child stops the private parent runtime and its
+owned tools before recovery writes begin. On macOS/Linux, failed children resume
+serially in their original sessions with the configured model fallback pool;
+the parent then resumes its own session with their recovery handoffs. Historical
+failures from an earlier turn are displayed but never automatically replayed.
+If safe recovery cannot proceed, the outcome remains blocked. Native recovery is
+bounded to two handoff rounds per task turn and three levels of nested recovery.
+Windows reports native failures as blocked without automatically resuming them.
+
+Agent logs retain the actual session and role that produced each message/tool.
+Failed and idle child outcomes settle the activity indicator. Multiple children
+of one role are tracked independently: one stopped developer cannot hide another
+developer that is still working. Recovery output appears in the recovered
+agent's log, while the parent keeps its own session, report and log.
 
 ## Verbosity
 

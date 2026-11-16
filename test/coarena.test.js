@@ -11,7 +11,6 @@ import { FREE_FALLBACK_MODELS } from '../src/profiles.js';
 
 const keys = { COARENA_API_KEY_1: 'test-key-one', COARENA_API_KEY_2: 'test-key-two' };
 const fourKeys = { ...keys, COARENA_API_KEY_3: 'test-key-three', COARENA_API_KEY_4: 'test-key-four' };
-const apiUsageLimit = 'You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC.';
 const expected = [
   'coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5',
   'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2',
@@ -19,6 +18,73 @@ const expected = [
   'coarena-1/gemini-3-8-flash', 'coarena-2/gemini-3-8-flash',
   'coarena-1/deepseek-v4-1-flash-1017', 'coarena-2/deepseek-v4-1-flash-1017',
 ];
+const apiUsageLimit = 'You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC.';
+
+test('automatic model aliases select the highest distinct populated key and register every model', () => {
+  const models = ['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6-luna', 'gemini-3-8-flash', 'deepseek-v4-1-flash-1017'];
+  assert.deepEqual(coarenaModelChoices(fourKeys), models.map((model) => `coarena/${model}`));
+  assert.deepEqual(coarenaModelChoices({}), []);
+  const env = { ...fourKeys, COARENA_API_KEY_5: '', COARENA_API_KEY_10: fourKeys.COARENA_API_KEY_1 };
+  const config = JSON.parse(coarenaRunEnv(env, 'coarena/gpt-6-luna').OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.providers.coarena.settings.apiKey, '{env:COARENA_API_KEY_4}');
+  assert.deepEqual(Object.keys(config.providers.coarena.models), models);
+  assert.equal(config.providers.coarena.models['gpt-6-luna'].name, 'GPT-6 Luna (Coarena)');
+  assert.ok(!JSON.stringify(config).includes(fourKeys.COARENA_API_KEY_4));
+});
+
+test('choosing one model automatically rotates keys 4 → 3 → 2 → 1, then Go, without changing other agents', async () => {
+  for (const family of ['gpt-6-luna', 'gemini-3-8-flash', 'deepseek-v4-1-flash-1017']) {
+    const dir = mkdtempSync(join(tmpdir(), 'factory-auto-key-model-'));
+    try {
+      const callsFile = join(dir, 'calls.jsonl');
+      const model = `coarena/${family}`;
+      const agentModels = { orchestrator: GO_MODEL_IDS[1], developer: model };
+      const result = await launchRunWithFallback({
+        model: agentModels.orchestrator, agent: 'developer', agentModels, autoFallback: true,
+        fallbackModels: GO_MODEL_IDS, bin: fakeCli(dir), task: 'hello', retryDelayMs: 0,
+        env: { ...fourKeys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR_MESSAGE: apiUsageLimit },
+      });
+      const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse);
+      const expectedCalls = [model, ...[3, 2, 1].map((slot) => `coarena-${slot}/${family}`), GO_MODEL_IDS[0]];
+      assert.deepEqual(calls.map((call) => call.model), expectedCalls);
+      assert.equal(calls[0].overlay.providers.coarena.settings.apiKey, '{env:COARENA_API_KEY_4}');
+      assert.ok(calls.every((call) => call.overlay.agents.orchestrator.model === agentModels.orchestrator));
+      assert.deepEqual(calls.map((call) => call.overlay.agents.developer.model), expectedCalls);
+      assert.equal(agentModels.developer, model);
+      assert.equal(result.result.code, 0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('API usage limits trigger fallback without retrying authentication or permission errors', () => {
+  for (const message of [apiUsageLimit, 'You have hit your API usage limit.', 'Usage limit exceeded', '429 quota exhausted', 'Maximum context length exceeded', 'Invalid API usage: unsupported parameter']) {
+    assert.equal(isTransientProviderError(message), true, message);
+  }
+  for (const message of ['401 invalid API key', '403 permission denied']) {
+    assert.equal(isTransientProviderError(message), false, message);
+  }
+});
+
+test('Coarena paid-tier rejection tries the remaining keys before Go', async () => {
+  const message = 'Claude Fable 5.2 is not part of the free tier. Free accounts can use GPT-6 Luna, Gemini 3.8 Flash and DeepSeek V4.1 Flash 1017. Add credits to use every model: https://coarena.ai/account/api/billing';
+  assert.equal(isTransientProviderError(message), true);
+  for (const code of ['payment_required', 'insufficient_balance']) assert.equal(isTransientProviderError(code), true);
+  const dir = mkdtempSync(join(tmpdir(), 'factory-paid-tier-'));
+  try {
+    const callsFile = join(dir, 'calls.jsonl');
+    const options = { model: 'coarena-4/claude-fable-5-2', autoFallback: true };
+    syncModelRouting(options, GO_MODEL_IDS, fourKeys);
+    const result = await launchRunWithFallback({
+      ...options, bin: fakeCli(dir), task: 'hello', retryDelayMs: 0,
+      env: { ...fourKeys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR_MESSAGE: message },
+    });
+    const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(calls.map((call) => call.model), [4, 3, 2, 1].map((slot) => `coarena-${slot}/claude-fable-5-2`).concat(GO_MODEL_IDS[0]));
+    assert.ok(calls.slice(1).every((call) => call.args[call.args.indexOf('--session') + 1] === 'session-from-first-attempt'));
+    assert.equal(result.result.code, 0);
+    assert.equal(result.model, GO_MODEL_IDS[0]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('available credentials precede Go, with no empty or duplicate key attempts', () => {
   assert.deepEqual(coarenaModels(keys), expected);
@@ -38,6 +104,51 @@ test('available credentials precede Go, with no empty or duplicate key attempts'
   assert.equal(options.model, null);
   assert.deepEqual(options.fallbackModels, FREE_FALLBACK_MODELS);
   assert.equal(parseArgs(['--fallback-models', 'a/b']).autoFallback, false);
+});
+
+test('any number of numbered keys becomes a provider slot in order', () => {
+  const env = {
+    COARENA_API_KEY_1: 'one', COARENA_API_KEY_2: 'two', COARENA_API_KEY_3: 'three',
+    COARENA_API_KEY_10: 'ten', UNRELATED_COARENA_API_KEY_0: 'ignored', COARENA_API_KEY_0: 'ignored',
+  };
+  assert.deepEqual(coarenaModels(env), [
+    'coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-3/claude-opus-5-5', 'coarena-10/claude-opus-5-5',
+    'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2', 'coarena-3/claude-fable-5-2', 'coarena-10/claude-fable-5-2',
+    'coarena-1/gpt-6-luna', 'coarena-2/gpt-6-luna', 'coarena-3/gpt-6-luna', 'coarena-10/gpt-6-luna',
+    'coarena-1/gemini-3-8-flash', 'coarena-2/gemini-3-8-flash', 'coarena-3/gemini-3-8-flash', 'coarena-10/gemini-3-8-flash',
+    'coarena-1/deepseek-v4-1-flash-1017', 'coarena-2/deepseek-v4-1-flash-1017', 'coarena-3/deepseek-v4-1-flash-1017', 'coarena-10/deepseek-v4-1-flash-1017',
+  ]);
+  const run = coarenaRunEnv(env, 'coarena-3/claude-opus-5-5');
+  const config = JSON.parse(run.OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.providers['coarena-3'].settings.apiKey, '{env:COARENA_API_KEY_3}');
+  assert.equal(config.providers['coarena-10'].settings.apiKey, '{env:COARENA_API_KEY_10}');
+  assert.ok(config.providers['coarena-0'] === undefined);
+  assert.deepEqual(config.experimental.policies.map((p) => p.resource), ['coarena-1', 'coarena-2', 'coarena-3', 'coarena-10', 'coarena']);
+  const options = { model: null, autoFallback: true };
+  syncModelRouting(options, GO_MODEL_IDS, env);
+  assert.equal(options.model, 'coarena/claude-opus-5-5');
+  assert.deepEqual(options.fallbackModels.slice(0, 3), [
+    'coarena-3/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-1/claude-opus-5-5',
+  ]);
+  const dir = mkdtempSync(join(tmpdir(), 'factory-slots-'));
+  try {
+    const path = join(dir, '.env');
+    writeFileSync(path, 'COARENA_API_KEY_3=from-file\n');
+    const loaded = {};
+    loadCoarenaEnv(path, loaded);
+    assert.deepEqual(loaded, { COARENA_API_KEY_3: 'from-file' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('automatic key rotation descends, skips missing/duplicate keys, and wraps through unused keys', () => {
+  const env = { ...fourKeys, COARENA_API_KEY_3: '', COARENA_API_KEY_5: fourKeys.COARENA_API_KEY_2, COARENA_API_KEY_10: 'ten' };
+  const selected = 'coarena-4/claude-fable-5-2';
+  const options = { model: selected, autoFallback: true };
+  syncModelRouting(options, GO_MODEL_IDS, env);
+  assert.deepEqual(options.fallbackModels, [
+    'coarena-2/claude-fable-5-2', 'coarena-1/claude-fable-5-2', 'coarena-10/claude-fable-5-2', ...GO_MODEL_IDS,
+  ]);
+  assert.deepEqual(automaticFallbackModels(selected, coarenaModels({}), GO_MODEL_IDS), GO_MODEL_IDS);
 });
 
 test('.env loads only Coarena keys and does not override exports or leak values into config', () => {
@@ -141,116 +252,6 @@ test('manual fallback lists retain their exact key and model order, then continu
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('permanent authentication errors stop instead of falling through the pool', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-auth-'));
-  try {
-    const callsFile = join(dir, 'calls.jsonl');
-    const result = await launchRunWithFallback({
-      bin: fakeCli(dir), task: 'hello', model: expected[0], fallbackModels: expected.slice(1),
-      env: { ...keys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR: 'permanent' },
-    });
-    assert.equal(result.result.code, 1);
-    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('cancelling during quota backoff prevents the next attempt', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-abort-'));
-  try {
-    const callsFile = join(dir, 'calls.jsonl');
-    let handle;
-    await launchRunWithFallback({
-      bin: fakeCli(dir), task: 'hello', model: expected[0], fallbackModels: expected.slice(1),
-      env: { ...keys, FACTORY_TEST_CALLS: callsFile },
-      onHandle: (value) => { handle = value; }, onRetry: () => handle.kill('SIGTERM'),
-    });
-    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('exhausting both credentials returns a failure even when the CLI exits zero', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-exhausted-'));
-  try {
-    const callsFile = join(dir, 'calls.jsonl');
-    const result = await launchRunWithFallback({
-      bin: fakeCli(dir), task: 'hello', model: expected[0], fallbackModels: [expected[1]],
-      env: { ...keys, FACTORY_TEST_CALLS: callsFile },
-    });
-    assert.equal(result.exhausted, true);
-    assert.equal(result.result.code, 1);
-    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, 2);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('parallel workers start on the primary before consuming any fallbacks', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-workers-'));
-  const previous = process.env.FACTORY_TEST_CALLS;
-  try {
-    process.env.FACTORY_TEST_CALLS = join(dir, 'calls.jsonl');
-    const manager = createWorkerManager({ model: expected[0], fallbackModels: [GO_MODEL_IDS[0]] });
-    const bin = fakeCli(dir);
-    const first = manager.start({ task: { id: 'a', agent: 'explorer' }, bin });
-    const second = manager.start({ task: { id: 'b', agent: 'reviewer' }, bin });
-    assert.equal(first.record.model, expected[0]);
-    assert.equal(second.record.model, expected[0]);
-    assert.ok(first.record.handle, 'first attempt can be cancelled immediately');
-    await Promise.all([first.done, second.done]);
-    assert.equal(first.record.state, 'completed');
-    assert.equal(second.record.state, 'completed');
-    assert.equal(first.record.model, GO_MODEL_IDS[0]);
-    assert.equal(first.record.error, null);
-  } finally {
-    if (previous === undefined) delete process.env.FACTORY_TEST_CALLS;
-    else process.env.FACTORY_TEST_CALLS = previous;
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('any number of numbered keys becomes a provider slot in order', () => {
-  const env = {
-    COARENA_API_KEY_1: 'one', COARENA_API_KEY_2: 'two', COARENA_API_KEY_3: 'three',
-    COARENA_API_KEY_10: 'ten', UNRELATED_COARENA_API_KEY_0: 'ignored', COARENA_API_KEY_0: 'ignored',
-  };
-  assert.deepEqual(coarenaModels(env), [
-    'coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-3/claude-opus-5-5', 'coarena-10/claude-opus-5-5',
-    'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2', 'coarena-3/claude-fable-5-2', 'coarena-10/claude-fable-5-2',
-    'coarena-1/gpt-6-luna', 'coarena-2/gpt-6-luna', 'coarena-3/gpt-6-luna', 'coarena-10/gpt-6-luna',
-    'coarena-1/gemini-3-8-flash', 'coarena-2/gemini-3-8-flash', 'coarena-3/gemini-3-8-flash', 'coarena-10/gemini-3-8-flash',
-    'coarena-1/deepseek-v4-1-flash-1017', 'coarena-2/deepseek-v4-1-flash-1017', 'coarena-3/deepseek-v4-1-flash-1017', 'coarena-10/deepseek-v4-1-flash-1017',
-  ]);
-  const run = coarenaRunEnv(env, 'coarena-3/claude-opus-5-5');
-  const config = JSON.parse(run.OPENCODE_CONFIG_CONTENT);
-  assert.equal(config.providers['coarena-3'].settings.apiKey, '{env:COARENA_API_KEY_3}');
-  assert.equal(config.providers['coarena-10'].settings.apiKey, '{env:COARENA_API_KEY_10}');
-  assert.ok(config.providers['coarena-0'] === undefined);
-  assert.deepEqual(config.experimental.policies.map((p) => p.resource), ['coarena-1', 'coarena-2', 'coarena-3', 'coarena-10', 'coarena']);
-  const options = { model: null, autoFallback: true };
-  syncModelRouting(options, GO_MODEL_IDS, env);
-  assert.equal(options.model, 'coarena/claude-opus-5-5');
-  assert.deepEqual(options.fallbackModels.slice(0, 3), [
-    'coarena-3/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-1/claude-opus-5-5',
-  ]);
-  const dir = mkdtempSync(join(tmpdir(), 'factory-slots-'));
-  try {
-    const path = join(dir, '.env');
-    writeFileSync(path, 'COARENA_API_KEY_3=from-file\n');
-    const loaded = {};
-    loadCoarenaEnv(path, loaded);
-    assert.deepEqual(loaded, { COARENA_API_KEY_3: 'from-file' });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('automatic key rotation descends, skips missing/duplicate keys, and wraps through unused keys', () => {
-  const env = { ...fourKeys, COARENA_API_KEY_3: '', COARENA_API_KEY_5: fourKeys.COARENA_API_KEY_2, COARENA_API_KEY_10: 'ten' };
-  const selected = 'coarena-4/claude-fable-5-2';
-  const options = { model: selected, autoFallback: true };
-  syncModelRouting(options, GO_MODEL_IDS, env);
-  assert.deepEqual(options.fallbackModels, [
-    'coarena-2/claude-fable-5-2', 'coarena-1/claude-fable-5-2', 'coarena-10/claude-fable-5-2', ...GO_MODEL_IDS,
-  ]);
-  assert.deepEqual(automaticFallbackModels(selected, coarenaModels({}), GO_MODEL_IDS), GO_MODEL_IDS);
-});
-
 test('automatic fallback uses key 4 → 3 → 2 → 1 on the selected model, then Go, for root and individual agents', async () => {
   for (const family of ['claude-fable-5-2', 'claude-opus-5-5']) {
     for (const successSlot of [null, 3]) {
@@ -334,59 +335,98 @@ test('API usage limit without a status code retries the selected model on each k
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Coarena paid-tier rejection tries the remaining keys before Go', async () => {
-  const message = 'Claude Fable 5.2 is not part of the free tier. Free accounts can use GPT-6 Luna, Gemini 3.8 Flash and DeepSeek V4.1 Flash 1017. Add credits to use every model: https://coarena.ai/account/api/billing';
-  assert.equal(isTransientProviderError(message), true);
-  for (const code of ['payment_required', 'insufficient_balance']) assert.equal(isTransientProviderError(code), true);
-  const dir = mkdtempSync(join(tmpdir(), 'factory-paid-tier-'));
+test('parallel worker recovers from API usage limits on its selected agent model', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-worker-api-limit-'));
   try {
     const callsFile = join(dir, 'calls.jsonl');
-    const options = { model: 'coarena-4/claude-fable-5-2', autoFallback: true };
-    syncModelRouting(options, GO_MODEL_IDS, fourKeys);
-    const result = await launchRunWithFallback({
-      ...options, bin: fakeCli(dir), task: 'hello', retryDelayMs: 0,
-      env: { ...fourKeys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR_MESSAGE: message },
+    const bin = join(dir, 'opencode');
+    writeFileSync(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2), model = args[args.indexOf('-m') + 1];
+fs.appendFileSync(${JSON.stringify(callsFile)}, model + '\\n');
+console.log(JSON.stringify(model.startsWith('coarena-')
+  ? {type:'error',sessionID:'worker-session',error:{data:{message:${JSON.stringify(apiUsageLimit)}}}}
+  : {type:'text',part:{text:'Recovered.\\nTHEFACTORY_TASK_RESULT: completed'}}));
+`, { mode: 0o700 });
+    const agentModels = { orchestrator: 'opencode/glm-5.3-flash-free', developer: expected[2] };
+    const manager = createWorkerManager({
+      model: agentModels.orchestrator, agentModels, autoFallback: false,
+      fallbackModels: [expected[3], GO_MODEL_IDS[0]],
     });
-    const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(calls.map((call) => call.model), [4, 3, 2, 1].map((slot) => `coarena-${slot}/claude-fable-5-2`).concat(GO_MODEL_IDS[0]));
-    assert.ok(calls.slice(1).every((call) => call.args[call.args.indexOf('--session') + 1] === 'session-from-first-attempt'));
-    assert.equal(result.result.code, 0);
-    assert.equal(result.model, GO_MODEL_IDS[0]);
+    const { record, done } = manager.start({ task: { id: 'implementation', agent: 'developer', readOnly: false }, dir, bin });
+    await done;
+    assert.deepEqual(readFileSync(callsFile, 'utf8').trim().split('\n'), [expected[2], expected[3], GO_MODEL_IDS[0]]);
+    assert.equal(record.state, 'completed');
+    assert.equal(record.model, GO_MODEL_IDS[0]);
+    assert.equal(record.error, null);
+    assert.equal(record.acceptanceStatus, 'completed');
+    assert.equal(agentModels.developer, expected[2], 'temporary retries preserve the selected model');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('automatic model aliases select the highest distinct populated key and register every model', () => {
-  const models = ['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6-luna', 'gemini-3-8-flash', 'deepseek-v4-1-flash-1017'];
-  assert.deepEqual(coarenaModelChoices(fourKeys), models.map((model) => `coarena/${model}`));
-  assert.deepEqual(coarenaModelChoices({}), []);
-  const env = { ...fourKeys, COARENA_API_KEY_5: '', COARENA_API_KEY_10: fourKeys.COARENA_API_KEY_1 };
-  const config = JSON.parse(coarenaRunEnv(env, 'coarena/gpt-6-luna').OPENCODE_CONFIG_CONTENT);
-  assert.equal(config.providers.coarena.settings.apiKey, '{env:COARENA_API_KEY_4}');
-  assert.deepEqual(Object.keys(config.providers.coarena.models), models);
-  assert.equal(config.providers.coarena.models['gpt-6-luna'].name, 'GPT-6 Luna (Coarena)');
-  assert.ok(!JSON.stringify(config).includes(fourKeys.COARENA_API_KEY_4));
+test('invalid credentials try the remaining configured routes and end as a blocker', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-auth-'));
+  try {
+    const callsFile = join(dir, 'calls.jsonl');
+    const pool = expected.slice(0, 4);
+    const result = await launchRunWithFallback({
+      bin: fakeCli(dir), task: 'hello', model: pool[0], fallbackModels: pool.slice(1),
+      env: { ...keys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR: 'permanent' },
+    });
+    assert.equal(result.result.code, 1);
+    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, pool.length);
+    assert.equal(result.result.blocked, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('choosing one model automatically rotates keys 4 → 3 → 2 → 1, then Go, without changing other agents', async () => {
-  for (const family of ['gpt-6-luna', 'gemini-3-8-flash', 'deepseek-v4-1-flash-1017']) {
-    const dir = mkdtempSync(join(tmpdir(), 'factory-auto-key-model-'));
-    try {
-      const callsFile = join(dir, 'calls.jsonl');
-      const model = `coarena/${family}`;
-      const agentModels = { orchestrator: GO_MODEL_IDS[1], developer: model };
-      const result = await launchRunWithFallback({
-        model: agentModels.orchestrator, agent: 'developer', agentModels, autoFallback: true,
-        fallbackModels: GO_MODEL_IDS, bin: fakeCli(dir), task: 'hello', retryDelayMs: 0,
-        env: { ...fourKeys, FACTORY_TEST_CALLS: callsFile, FACTORY_TEST_ERROR_MESSAGE: apiUsageLimit },
-      });
-      const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse);
-      const expectedCalls = [model, ...[3, 2, 1].map((slot) => `coarena-${slot}/${family}`), GO_MODEL_IDS[0]];
-      assert.deepEqual(calls.map((call) => call.model), expectedCalls);
-      assert.equal(calls[0].overlay.providers.coarena.settings.apiKey, '{env:COARENA_API_KEY_4}');
-      assert.ok(calls.every((call) => call.overlay.agents.orchestrator.model === agentModels.orchestrator));
-      assert.deepEqual(calls.map((call) => call.overlay.agents.developer.model), expectedCalls);
-      assert.equal(agentModels.developer, model);
-      assert.equal(result.result.code, 0);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+test('cancelling during quota backoff prevents the next attempt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-abort-'));
+  try {
+    const callsFile = join(dir, 'calls.jsonl');
+    let handle;
+    await launchRunWithFallback({
+      bin: fakeCli(dir), task: 'hello', model: expected[0], fallbackModels: expected.slice(1),
+      env: { ...keys, FACTORY_TEST_CALLS: callsFile },
+      onHandle: (value) => { handle = value; }, onRetry: () => handle.kill('SIGTERM'),
+    });
+    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('exhausting both credentials returns a failure even when the CLI exits zero', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-exhausted-'));
+  try {
+    const callsFile = join(dir, 'calls.jsonl');
+    const result = await launchRunWithFallback({
+      bin: fakeCli(dir), task: 'hello', model: expected[0], fallbackModels: [expected[1]],
+      env: { ...keys, FACTORY_TEST_CALLS: callsFile },
+    });
+    assert.equal(result.exhausted, true);
+    assert.equal(result.result.code, 1);
+    assert.equal(readFileSync(callsFile, 'utf8').trim().split('\n').length, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('parallel workers start on the primary before consuming any fallbacks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-workers-'));
+  const previous = process.env.FACTORY_TEST_CALLS;
+  try {
+    process.env.FACTORY_TEST_CALLS = join(dir, 'calls.jsonl');
+    const manager = createWorkerManager({ model: expected[0], fallbackModels: [GO_MODEL_IDS[0]] });
+    const bin = fakeCli(dir);
+    const first = manager.start({ task: { id: 'a', agent: 'explorer' }, bin });
+    const second = manager.start({ task: { id: 'b', agent: 'reviewer' }, bin });
+    assert.equal(first.record.model, expected[0]);
+    assert.equal(second.record.model, expected[0]);
+    assert.ok(first.record.handle, 'first attempt can be cancelled immediately');
+    await Promise.all([first.done, second.done]);
+    assert.equal(first.record.state, 'completed');
+    assert.equal(second.record.state, 'completed');
+    assert.equal(first.record.model, GO_MODEL_IDS[0]);
+    assert.equal(first.record.error, null);
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_TEST_CALLS;
+    else process.env.FACTORY_TEST_CALLS = previous;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,8 @@
 /** Complete, auditable closing reports with a bounded orchestrator synthesis. */
 import { launchRunWithFallback } from './run.js';
 import { stripAnsi } from './canvas.js';
+import { unfinishedRecap } from './recovery.js';
+export { unfinishedRecap } from './recovery.js';
 
 function clean(value) { return stripAnsi(value ?? '').trim(); }
 function clipped(value, max) {
@@ -10,17 +12,6 @@ function clipped(value, max) {
 function reportTail(value, max) {
   const text = clean(value);
   return text.length > max ? `[earlier output omitted; full report remains in the agent log]\n${text.slice(-max)}` : text;
-}
-
-export function unfinishedRecap(report) {
-  const text = clean(report).replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '').replace(/^THEFACTORY_TASK_RESULT:.*$/gm, '');
-  const headers = [...text.matchAll(/^(?:#{1,3}\s*)?Not finished\s*:?\s*$/gim)];
-  if (!headers.length) return '';
-  const header = headers.at(-1);
-  const tail = text.slice(header.index + header[0].length);
-  const end = tail.search(/^(?:#{1,3}\s+|Verification\b)/m);
-  const body = (end < 0 ? tail : tail.slice(0, end)).replace(/^\s*[-*]\s*/gm, '').trim();
-  return /^(?:none(?: reported)?|nothing remains unfinished|no unfinished (?:items|work)|all requested work (?:is )?completed)[.!]?$/i.test(body) ? '' : body;
 }
 
 export function buildOverviewData({ objective = '', state = 'done', tasks = [], workers = [], detail = '', report = '' } = {}) {
@@ -100,13 +91,15 @@ export async function synthesizeOverview(data, { launcher = launchRunWithFallbac
   try {
     const launched = await launcher({
       ...options, agent: 'orchestrator', reportOnly: true, task: buildOverviewPrompt(data),
+      signal,
+      onRetry: (...args) => { chunks.clear(); sequence = 0; options.onRetry?.(...args); },
       onHandle: (next) => { handle = next; onHandle?.(next); if (signal?.aborted) stop(); },
       onEvent: (parsed) => {
         if (parsed.text) { chunks.set(parsed.logEntry?.id || `part-${sequence++}`, parsed.text); onText?.(parsed.text); }
       },
     });
     if (signal?.aborted) return { text: renderOverview({ ...data, state: 'aborted' }), synthesized: false };
-    if (launched.result?.error || launched.result?.code !== 0) throw new Error(launched.result?.error?.message || `recap exited ${launched.result?.code}`);
+    if (launched.result?.error || launched.result?.code !== 0) throw new Error(launched.result?.reason || launched.result?.error?.message || `recap exited ${launched.result?.code}`);
     const recap = [...chunks.values()].join('\n\n').trim();
     if (!recap) throw new Error('no recap text returned');
     return { text: renderOverview(data, { recap }), synthesized: true };

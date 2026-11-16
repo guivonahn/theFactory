@@ -14,6 +14,7 @@ import { drawFactory, factoryGeometry } from './factory.js';
 import { formatLogEntries, LOG_FILTERS, logMatches } from './logFormat.js';
 import { drawWorker, prefersReducedMotion, WORKER_DESIGNS } from './creatures.js';
 import { promptProgress, progressBar } from './progress.js';
+import { createSessionPicker, sessionPickerRows, sessionPickerKey } from './sessionPicker.js';
 import {
   createQuestionState,
   currentField,
@@ -118,6 +119,8 @@ export class App {
     this.logCache = null;
     this.logEntryCache = new WeakMap();
     this.agentRuntime = new Map();
+    this.agentSessions = new Map();
+    this.sessionPicker = { ...createSessionPicker(), open: false };
     this.logView = { open: false, agentKey: 'orchestrator', scroll: 0, filter: 'all', paused: false };
     this.configView = { open: false, selected: 'model', scroll: 0, info: {} };
     this.modelPicker = { open: false, key: null, models: [], selected: 0, scroll: 0 };
@@ -251,6 +254,32 @@ export class App {
 
   setAgentRuntime(agent, info) {
     this.agentRuntime.set(agent, { ...this.agentRuntime.get(agent), ...info });
+  }
+
+  openSessions(groups, options = {}) {
+    this.sessionPicker = createSessionPicker(groups, options);
+    const current = sessionPickerRows(this.sessionPicker).findIndex((row) => row.group.id === options.currentID);
+    if (current >= 0) this.sessionPicker.selected = current;
+  }
+
+  handleSessionPickerKey(text) {
+    return sessionPickerKey(this.sessionPicker, text, Math.max(1, Math.floor((this.height - 11) / 2)));
+  }
+
+  selectConversation(group) {
+    this.orchestratorHistory = []; this.centerLog = []; this.agentRuntime.clear(); this.agentSessions.clear();
+    this.promptTasks = []; this.completionOverview = null; this.logView.open = false;
+    this.totalMessages = 0; this.totalTokens = 0; this.totalTools = 0; this.totalKb = 0; this.packets = []; this.showOther = false;
+    this._setWorker(this.orchestratorWorker, 'idle');
+    this.parallel.enabled = false;
+    this.run = { ...this.run, state: 'idle', sessionID: group.id, pid: null, detail: '', duration: 0, objective: '' };
+    for (const state of this.agents.values()) {
+      state.history = []; state.messages = []; state.messageCount = 0; state.toolCount = 0; state.sessions = 0; state.status = 'idle';
+      this._setWorker(state, 'idle');
+    }
+    this.logRevision++;
+    this.setSession(group.id, group.title);
+    this.sessionPicker.open = false;
   }
 
   recordAgentLog(agent, entry) {
@@ -490,6 +519,7 @@ export class App {
 
   /** Enter the running state for a spawned task. */
   startRun({ pid = null, sessionID = null, resumed = false, parallel = null, objective = '' } = {}) {
+    this.agentSessions.clear();
     this.promptTasks = [];
     this.runPhase = parallel ? 'planning' : 'working';
     this.completionOverview = null;
@@ -523,7 +553,7 @@ export class App {
   setParallelWorkers(workers) {
     this.parallel.enabled = true;
     this.parallel.workers = Array.isArray(workers) ? workers.slice() : [];
-    const counts = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    const counts = { queued: 0, running: 0, completed: 0, failed: 0, blocked: 0, cancelled: 0 };
     for (const w of this.parallel.workers) {
       if (w.state && counts[w.state] !== undefined) counts[w.state] += 1;
     }
@@ -639,6 +669,10 @@ export class App {
       this.activity = `✗ ${truncate(this.run.detail || 'run failed', 70)}`;
       this.centerFlashColor = T.error;
       this.centerFlashUntil = this.now + 1200;
+    } else if (state === 'blocked') {
+      this.activity = `⊘ ${truncate(this.run.detail || 'waiting for an external dependency', 70)}`;
+      this.centerFlashColor = T.textSecondary;
+      this.centerFlashUntil = this.now + 350;
     }
   }
 
@@ -656,6 +690,7 @@ export class App {
     if (this.run.state === 'done') return `✓ task complete in ${this.runElapsedSeconds()}s`;
     if (this.run.state === 'aborted') return `■ aborted after ${this.runElapsedSeconds()}s`;
     if (this.run.state === 'error') return `✗ ${truncate(this.run.detail || 'run failed', 44)}`;
+    if (this.run.state === 'blocked') return `⊘ blocked · ${truncate(this.run.detail, 44)}`;
     const session = this.run.sessionID ? ` · session ${this.run.sessionID.slice(0, 12)}` : '';
     return `ready · type a task${session}`;
   }
@@ -712,6 +747,25 @@ export class App {
     if (event.kind === 'msg') this._applyMessage(event);
     else if (event.kind === 'tool') this._applyTool(event);
     else if (event.kind === 'status') this._applyStatus(event);
+    this._reconcileAgentSession(event);
+  }
+
+  _reconcileAgentSession(event) {
+    const sessionID = event.sessionID ?? event.logEntry?.sessionID;
+    const agent = this._agentKey(event.kind === 'msg' && event.dir === 'out' ? event.to : event.from);
+    if (!sessionID || agent === 'orchestrator' || !this.agents.has(agent)) return;
+    const at = event.logEntry?.timestamp ?? Date.now();
+    const previous = this.agentSessions.get(sessionID);
+    if (!previous || at >= previous.at) {
+      const terminal = event.state === 'done' ? 'done' : ['idle', 'error', 'failed'].includes(event.state) ? 'idle' : null;
+      this.agentSessions.set(sessionID, { agent, at, status: terminal ?? this.agents.get(agent).status });
+    }
+    const sessions = [...this.agentSessions.values()].filter((session) => session.agent === agent);
+    const status = sessions.some((session) => session.status === 'working') ? 'working'
+      : sessions.every((session) => session.status === 'done') ? 'done' : 'idle';
+    const state = this.agents.get(agent);
+    state.status = status;
+    this._setWorker(state, status === 'working' ? 'working' : status === 'done' ? 'completed' : 'idle');
   }
 
   _applyMessage(event) {
@@ -827,8 +881,8 @@ export class App {
     if (key === 'other') this.showOther = true;
     if (text && !event.logRecorded) this._pushHistory(state, { dir: 'status', text: stripAnsi(event.text), kind: 'status', at: this.now, ...event.logEntry });
     const lowered = text.toLowerCase();
-    const failed = event.state === 'error' || event.state === 'failed' || /✗|\b(?:fail(?:ed|ure)?|error)\b/.test(lowered);
-    const settled = event.state === 'idle' || failed || /\b(?:idle|cancel(?:led|ed)?|abort(?:ed)?)\b/.test(lowered);
+    const failed = !event.recovering && (event.state === 'error' || event.state === 'failed' || /✗|\b(?:fail(?:ed|ure)?|error)\b/.test(lowered));
+    const settled = event.state === 'idle' || failed || !event.recovering && /\b(?:idle|cancel(?:led|ed)?|abort(?:ed)?)\b/.test(lowered);
     const completed = /\b(?:done|complete[ds]?|finish(?:ed)?)\b/.test(lowered);
     // Explicit terminal state wins first, then keyword heuristics. Failure
     // keywords must settle to idle — previously any unknown status text fell
@@ -1193,6 +1247,7 @@ export class App {
     const rightCol = this.width - right.length - 1;
     let compactPrefix = this.inputMode && this.width < 100 && !this.workerPreview
       ? this.run.state === 'error' ? `failed · /log logs · ${this.run.detail}`
+        : this.run.state === 'blocked' ? `blocked · /overview · ${this.run.detail}`
         : `${this.run.state === 'running' ? `running · ${this.runElapsedSeconds()}s · Esc abort` : this.run.state === 'done' ? '✓ task complete' : 'ready · Enter run'} · /log logs`
       : prefix;
     if (!this.workerPreview && (this.inputMode || this.factoryPreview || this.run.state !== 'idle')) {
@@ -1457,6 +1512,49 @@ export class App {
     });
   }
 
+  _drawSessions() {
+    const picker = this.sessionPicker, rows = sessionPickerRows(picker);
+    const page = Math.max(1, Math.floor((this.height - 11) / 2));
+    picker.selected = Math.max(0, Math.min(picker.selected, rows.length - 1));
+    if (picker.selected < picker.scroll) picker.scroll = picker.selected;
+    if (picker.selected >= picker.scroll + page) picker.scroll = picker.selected - page + 1;
+    picker.scroll = Math.max(0, Math.min(picker.scroll, Math.max(0, rows.length - page)));
+    const width = this.width - 6;
+    this.canvas.box(0, 1, this.width - 2, this.height, T.border, 'SESSIONS');
+    this.canvas.write(1, 3, truncate(`Main conversations · ${picker.allProjects ? 'all projects' : 'this project'}`, width), T.textPrimary);
+    this.canvas.write(2, 3, truncate('Agent sessions stay with their parent conversation.', width), T.textSecondary);
+    this.canvas.write(3, 3, truncate(`Search: ${picker.query}▌`, width), T.textPrimary);
+    if (!rows.length) this.canvas.write(6, 3, truncate(picker.error || 'No conversations found. Tab switches project scope.', width), T.textSecondary);
+    const date = (at) => at ? new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'no activity';
+    const status = (state) => state === 'working' ? 'unfinished' : state;
+    rows.slice(picker.scroll, picker.scroll + page).forEach((row, index) => {
+      const y = 5 + index * 2, focused = picker.scroll + index === picker.selected;
+      let title, detail, titleCol = 5, detailCol = 7;
+      if (!row.member) {
+        const expanded = picker.expanded.has(row.group.id) || picker.query.trim();
+        title = `${row.group.childCount ? expanded ? '▾' : '▸' : '·'} ${row.number}. ${row.group.title}${row.group.id === picker.currentID ? ' · current' : ''}`;
+        const project = String(row.group.directory || '').split(/[\\/]/).filter(Boolean).at(-1) || 'project';
+        detail = `${project} · ${row.group.childCount} agent sessions · ${status(row.group.state)} · ${date(row.group.updatedAt)}`;
+      } else {
+        let depth = 1, parent = row.member.parentID;
+        const seen = new Set();
+        while (parent && parent !== row.group.id && depth < 4 && !seen.has(parent)) { seen.add(parent); depth++; parent = row.group.members.find((m) => m.id === parent)?.parentID; }
+        titleCol += depth * 2; detailCol = titleCol + 2;
+        title = `└ ${row.member.role}: ${row.member.title}`;
+        detail = `${status(row.member.state)} · ${row.member.id} · ${date(row.member.updatedAt)}`;
+      }
+      this.canvas.write(y, 3, focused ? '›' : ' ', T.textPrimary);
+      this.canvas.write(y, titleCol, truncate(title, this.width - titleCol - 3), focused ? T.textPrimary : T.textSecondary);
+      this.canvas.write(y + 1, detailCol, truncate(detail, this.width - detailCol - 3), T.textSecondary);
+    });
+    const chosen = rows[picker.selected]?.group;
+    this.canvas.write(this.height - 6, 3, truncate(chosen ? `Main session: ${chosen.id}` : '', width), T.textSecondary);
+    this.canvas.write(this.height - 5, 3, truncate(picker.error || (chosen ? `Resume main: ${chosen.title}` : 'Enter resumes the main conversation'), width), picker.error ? T.warning : T.textPrimary);
+    this.canvas.write(this.height - 4, 3, truncate(chosen?.directory || 'Recorded outcomes; browsing does not restart agents.', width), T.textSecondary);
+    this.canvas.write(this.height - 3, 3, truncate('Type to search · Tab project scope · PgUp/PgDn page', width), T.textSecondary);
+    this.canvas.write(this.height - 2, 3, truncate('↑/↓ choose · →/← expand · Enter resume · Esc close', width), T.textPrimary);
+  }
+
   /** Paint a compact session id/title header at the very top of the frame. */
   _drawSessionHeader() {
     if (!this.sessionID || this.layout.sky.rows < 1) return;
@@ -1508,6 +1606,7 @@ export class App {
       if (this.height > 2) this.canvas.write(2, 0, truncate(this.run.state === 'running' ? 'Task continues · Ctrl-C quits' : 'Ctrl-C quits', this.width), T.textSecondary);
       return;
     }
+    if (this.sessionPicker.open) { this._drawSessions(); return; }
     if (this.logView.open || this.configView.open || this.imageView.open || this.questionView.open) {
       this._drawLog();
       this._drawConfig();
