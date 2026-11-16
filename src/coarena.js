@@ -5,7 +5,13 @@ import { baseProfile, globalConfigPath } from './profiles.js';
 
 // Any number of keys is supported: COARENA_API_KEY_1, _2, _3, ... in .env.
 const KEY_NAME_PATTERN = /^COARENA_API_KEY_([1-9]\d*)$/;
-const MODELS = ['claude-opus-5-5', 'claude-fable-5-2'];
+const MODELS = {
+  'claude-opus-5-5': 'Claude Opus 5.5',
+  'claude-fable-5-2': 'Claude Fable 5.2',
+  'gpt-6-luna': 'GPT-6 Luna',
+  'gemini-3-8-flash': 'Gemini 3.8 Flash',
+  'deepseek-v4-1-flash-1017': 'DeepSeek V4.1 Flash 1017',
+};
 
 /** Coarena key names found in `values`, ordered by slot number. */
 function keyNames(values) {
@@ -30,7 +36,16 @@ export function loadCoarenaEnv(path = new URL('../.env', import.meta.url), env =
 }
 
 export function isCoarenaModel(model) {
-  return /^coarena-[1-9]\d*\//.test(String(model ?? ''));
+  return /^coarena(?:-[1-9]\d*)?\//.test(String(model ?? ''));
+}
+
+/** A saved legacy key selection appears as one automatic model choice in the UI. */
+export function coarenaModelChoice(model) {
+  return isCoarenaModel(model) ? model.replace(/^coarena-[1-9]\d*\//, 'coarena/') : model;
+}
+
+export function coarenaModelChoices(env = process.env) {
+  return [...new Set(coarenaModels(env).map(coarenaModelChoice))];
 }
 
 export function coarenaModels(env = process.env) {
@@ -42,17 +57,18 @@ export function coarenaModels(env = process.env) {
     seen.add(key);
     return [Number(KEY_NAME_PATTERN.exec(name)[1])];
   });
-  return MODELS.flatMap((model) => slots.map((slot) => `coarena-${slot}/${model}`));
+  return Object.keys(MODELS).flatMap((model) => slots.map((slot) => `coarena-${slot}/${model}`));
 }
 
 /** Rotate the selected model through keys downward, wrapping to unused higher slots. */
 export function automaticFallbackModels(model, available, fallbackModels) {
   if (!isCoarenaModel(model)) return [...new Set([...available, ...fallbackModels])].filter((next) => next !== model);
-  const slot = Number(model.split('/')[0].slice('coarena-'.length));
   const selected = model.split('/')[1].split('#')[0];
   const keySlot = (next) => Number(next.split('/')[0].slice('coarena-'.length));
   const sameModel = available.filter((next) => next.split('/')[1] === selected)
     .sort((a, b) => keySlot(b) - keySlot(a));
+  const slot = model.startsWith('coarena/') ? keySlot(sameModel[0] ?? 'coarena-0/')
+    : keySlot(model);
   return [...new Set([
     ...sameModel.filter((next) => keySlot(next) < slot),
     ...sameModel.filter((next) => keySlot(next) > slot),
@@ -65,7 +81,7 @@ export function syncModelRouting(options, goModels, env = process.env) {
   const customFree = baseProfile(options) === 'free' && ![options.model, ...Object.values(options.agentModels ?? {})].some(isCoarenaModel);
   const models = options.profile === 'free' || customFree ? [] : coarenaModels(env);
   if (options.profile === 'free' && isCoarenaModel(options.model)) options.model = null;
-  if (!options.model && options.profile == null && models.length) options.model = models[0];
+  if (!options.model && options.profile == null && models.length) options.model = coarenaModelChoice(models[0]);
   if (options.autoFallback) {
     options.fallbackModels = automaticFallbackModels(options.model, models, goModels);
   }
@@ -79,6 +95,7 @@ export function usesCoarena(options = {}) {
 export function ensureCoarenaPolicy(path = globalConfigPath(), env = process.env) {
   const providers = [...new Set(coarenaModels(env).map((model) => model.split('/')[0]))];
   if (!providers.length) return;
+  providers.unshift('coarena');
   const config = JSON.parse(readFileSync(path, 'utf8'));
   const container = config.policies ? config : (config.experimental ??= {});
   const before = container.policies ?? [];
@@ -107,14 +124,20 @@ export function coarenaRunEnv(env, model, { allAgents = false } = {}) {
       // OpenCode's runtime appends /messages; Python's Anthropic SDK appends
       // /v1/messages. This runtime therefore needs /v1 in the base URL.
       settings: { apiKey: `{env:${name}}`, baseURL: 'https://coarena.ai/api/v1' },
-      models: Object.fromEntries(MODELS.map((id) => [id, {
+      models: Object.fromEntries(Object.entries(MODELS).map(([id, name]) => [id, {
         modelID: id,
-        name: id === MODELS[0] ? 'Claude Opus 5.5 (Coarena)' : 'Claude Fable 5.2 (Coarena)',
+        name: `${name} (Coarena)`,
         capabilities: { tools: true, input: ['text', 'image'], output: ['text'] },
         limit: { context: 128000, output: 8192 },
       }])),
     };
     policies.push({ action: 'provider.use', resource: provider, effect: 'allow' });
+  }
+  // The selector uses one provider alias; its credential is chosen per process.
+  const preferred = coarenaModels(env).at(-1)?.split('/')[0];
+  if (preferred) {
+    config.providers.coarena = config.providers[preferred];
+    policies.push({ action: 'provider.use', resource: 'coarena', effect: 'allow' });
   }
   if (model) {
     config.model = model;

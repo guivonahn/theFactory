@@ -6,6 +6,7 @@
 import { AGENTS, AGENT_ORDER, ORCHESTRATOR, agentByKey, resolveAgent } from './agents.js';
 import { Canvas, charWidth, displayWidth, stripAnsi, truncate, wrapText } from './canvas.js';
 import { themeFor, APPLE_UIKIT } from './colors.js';
+import { coarenaModelChoice, isCoarenaModel } from './coarena.js';
 import { buildLayout, trackCellsFor } from './layout.js';
 import { highlightLine } from './highlight.js';
 import { formatReset } from './goUsage.js';
@@ -348,7 +349,7 @@ export class App {
   }
 
   openModelPicker(key, models, current) {
-    const selected = models.indexOf(current?.split('#')[0] ?? null);
+    const selected = models.indexOf(coarenaModelChoice(current?.split('#')[0] ?? null));
     this.modelPicker = { open: true, key, models, selected: Math.max(0, selected), scroll: 0 };
   }
 
@@ -358,7 +359,7 @@ export class App {
   }
 
   jumpModelPickerToCoarena() {
-    const index = this.modelPicker.models.findIndex((model) => model?.startsWith('coarena-'));
+    const index = this.modelPicker.models.findIndex(isCoarenaModel);
     if (index >= 0) this.modelPicker.selected = index;
   }
 
@@ -1332,10 +1333,10 @@ export class App {
     const width = Math.min(this.width - 4, 78);
     const height = Math.min(this.height - 2, picker.models.length + 4);
     const visible = Math.max(1, height - 4);
-    const hasCoarena = picker.models.some((model) => model?.startsWith('coarena-'));
+    const hasCoarena = picker.models.some(isCoarenaModel);
     let pinned = 0;
     if (hasCoarena) {
-      while (pinned < picker.models.length && (picker.models[pinned] === null || picker.models[pinned]?.startsWith('coarena-'))) pinned += 1;
+      while (pinned < picker.models.length && (picker.models[pinned] === null || isCoarenaModel(picker.models[pinned]))) pinned += 1;
     }
     const divider = pinned > 0 && pinned < picker.models.length ? 1 : 0;
     const catalogRows = Math.max(1, visible - pinned - divider);
@@ -1356,7 +1357,7 @@ export class App {
       const selected = modelIndex === picker.selected;
       const label = model ?? 'Use the all-agent model';
       this.canvas.write(row + 2 + offset, col + 2, selected ? '› ' : '  ', T.textPrimary);
-      this.canvas.write(row + 2 + offset, col + 4, truncate(label, width - 6), selected ? T.textPrimary : model?.startsWith('coarena-') ? T.info : T.textSecondary);
+      this.canvas.write(row + 2 + offset, col + 4, truncate(label, width - 6), selected ? T.textPrimary : isCoarenaModel(model) ? T.info : T.textSecondary);
     };
     for (let index = 0; index < pinned; index += 1) drawModel(index, index);
     if (divider) this.canvas.write(row + 2 + pinned, col + 2, '─'.repeat(width - 4), T.border);

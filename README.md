@@ -180,7 +180,8 @@ auto-approve, parallelism, nolimit, graphify and sound volume settings.
 The seven agent rows choose an independent **base model** for the orchestrator,
 explorer, architect, developer, reviewer, security, and tester. Use ↑/↓ to
 select a named agent row, then press Enter to open its model picker. The picker
-lists Coarena Opus/Fable with key 1 and key 2 separately. ↑/↓ selects a model,
+lists each Coarena model once: Opus 5.5, Fable 5.2, GPT-6 Luna, Gemini 3.8
+Flash, and DeepSeek V4.1 Flash 1017. Keys are selected automatically. ↑/↓ selects a model,
 Enter applies it to that agent, and Esc cancels. Coarena choices remain visible
 at the top even when the current model is far down the list; press **C** to
 jump directly to them. Home/End selects the first/last model. ←/→ still cycles models.
@@ -213,9 +214,10 @@ output volume is left untouched. Snapshot frames stay silent.
 ## Model profiles
 
 With Coarena keys configured and the default profile, task mode starts on Claude Opus 5.5.
-Automatic fallback keeps the selected Coarena model and tries keys in descending
-order: Fable 5.2 key 4 → key 3 → key 2 → key 1 → the existing OpenCode Go pool.
-If higher slots remain unused, rotation wraps to those in descending order before Go.
+Choose a model once; theFactory starts with the highest populated, distinct key
+and rotates downward on limits: key 4 → key 3 → key 2 → key 1 → the existing
+OpenCode Go pool, keeping the same Coarena model throughout key rotation.
+Explicit legacy key aliases still wrap to unused higher slots before Go.
 Only populated, distinct keys are tried. The free profile keeps using its free-only pool.
 Low/Medium/High keep their OpenCode Go lineup even when Coarena keys are
 available. To use Coarena for just one agent, select that agent in `/config`.
@@ -224,8 +226,10 @@ Individual retries change only the running agent's model.
 Coarena requires API credits for Fable 5.2 and Opus 5.5. A valid free-plan key
 alone does not unlock them. Add credits to the account that owns the key on
 [Coarena billing](https://coarena.ai/account/api/billing); the same configured
-key can then access these models. A paid-tier rejection tries the remaining
-keys and then OpenCode Go.
+key can then access these models. GPT-6 Luna, Gemini 3.8 Flash, and DeepSeek
+V4.1 Flash 1017 are available under Coarena's free tier, subject to its limits.
+Coarena may substitute another model; its API reports the model that answered.
+A paid-tier rejection tries the remaining keys and then OpenCode Go.
 
 Fill in `.env` beside `package.json` (see `.env.example`):
 
@@ -237,7 +241,7 @@ COARENA_API_KEY_2=your_second_key
 Add as many keys as you like by continuing the numbering
 (`COARENA_API_KEY_3`, `COARENA_API_KEY_4`, ...). Every populated, distinct key
 becomes another credential slot (`coarena-3`, `coarena-4`, ...) that joins the
-model pool and fallback chain automatically.
+automatic key rotation without adding duplicate selector entries.
 
 Then run `node bin/theFactory.js` normally. The CLI loads these variables
 automatically; exported values take precedence. `.env` is ignored by Git.
@@ -249,7 +253,7 @@ provider allowlist. Credentials and agent model overrides are supplied to each
 private OpenCode process, including parallel workers, without saving keys or
 replacing the global agent lineup. Each new task probes Coarena again.
 
-`--model coarena-1/claude-fable-5-2` selects Fable first. `--no-auto-fallback`
+`--model coarena/claude-fable-5-2` selects Fable with automatic keys. `--no-auto-fallback`
 disables automatic retries; `--fallback-models` supplies a custom list instead.
 Authentication/permission errors stop the run rather than triggering retries.
 

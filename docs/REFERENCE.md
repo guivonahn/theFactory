@@ -27,8 +27,9 @@ thefactory
 ## Models and profiles
 
 `/config` has an **all agents** model row and seven independent agent model
-rows. Enter on a model row opens its picker, including Coarena Opus/Fable
-aliases for each configured key. ↑/↓ selects, Enter applies, and Esc cancels;
+rows. Enter on a model row opens its picker. Coarena Opus 5.5, Fable 5.2,
+GPT-6 Luna, Gemini 3.8 Flash, and DeepSeek V4.1 Flash 1017 each appear once;
+key selection is automatic. ↑/↓ selects, Enter applies, and Esc cancels;
 Coarena entries stay visible above the scrolling catalog, including when the
 picker opens on a late free model. Press `C` to jump to Coarena, or Home/End
 to select the first/last model.
@@ -49,9 +50,11 @@ requires a saved Custom. Explicit model flags update Custom as well.
 Profile changes refresh the displayed models and variants immediately. Changes
 apply on the next task through private OpenCode processes, including parallel
 workers. Fallbacks are temporary and never save their models over Custom. A
-Coarena model rotates through keys in descending order, keeping the same model,
+Coarena model automatically starts on the highest populated, distinct key,
+then rotates through lower keys, keeping the same model,
 then uses the remaining non-Coarena fallback pool. For example, Fable key 4 →
-key 3 → key 2 → key 1 → OpenCode Go. Higher unused slots are tried after key 1.
+key 3 → key 2 → key 1 → OpenCode Go. Explicit legacy key selections still wrap
+to higher unused slots after key 1.
 With per-agent choices, a retry updates only the running agent's model.
 Coarena credentials make models available in the picker and fallback pool;
 they do not replace an explicitly selected preset's lineup.
@@ -70,8 +73,8 @@ when OpenCode supplies them.
 
 When `.env` contains `COARENA_API_KEY_1` and/or `COARENA_API_KEY_2` (any
 number of keys is supported — continue the numbering with `_3`, `_4`, ...),
-task mode prefers `coarena-1/claude-opus-5-5` (or the next available key if
-lower slots are unset). On a
+task mode prefers `coarena/claude-opus-5-5`, automatically using the highest
+populated, distinct key. On a
 provider quota/rate-limit error it keeps the selected model and rotates keys
 downward, wrapping to higher unused slots before the OpenCode Go pool below.
 Each task starts with its selected model again. The free profile excludes Coarena.
@@ -80,7 +83,7 @@ model. No key is written into the OpenCode configuration.
 
 The CLI uses OpenCode's native Anthropic runtime with
 `https://coarena.ai/api/v1` (this runtime appends `/messages`). It adds
-`coarena-1` / `coarena-2` to the global
+`coarena` and its numbered key aliases to the global
 provider policy on first use and sends provider definitions and agent models
 through `OPENCODE_CONFIG_CONTENT` to private (`--standalone`) processes.
 All seven agents follow the current attempt's model, including during

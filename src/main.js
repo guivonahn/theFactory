@@ -37,7 +37,7 @@ import { VERBOSITY_ORDER, applyVerbosityToAllAgents } from './verbosity.js';
 import { ensureGraphify, graphifyPrompt, withGraphifyPrompt } from './graphify.js';
 import { apiRequest, formAnswerBody } from './opencodeApi.js';
 import { openExternalCommand } from './media.js';
-import { coarenaModels, ensureCoarenaPolicy, syncModelRouting, usesCoarena } from './coarena.js';
+import { coarenaModelChoice, coarenaModelChoices, ensureCoarenaPolicy, syncModelRouting, usesCoarena } from './coarena.js';
 import { effectiveAgentModels, hasAgentModels, loadAgentModels, MODEL_AGENT_KEYS, resolvedModelConfig, syncProfileModel } from './agentModels.js';
 import { customizeModel, loadProfileConfig, restoreProfileConfig, saveProfileConfig, selectProfile } from './profileConfig.js';
 import {
@@ -157,10 +157,10 @@ export const GO_MODEL_IDS = [
 export function configModelChoices(options, key, { env = process.env, model } = {}) {
   return [...new Set([
     ...(key.startsWith('agent:') ? [null] : []),
-    ...coarenaModels(env), ...GO_MODEL_IDS, ...FREE_FALLBACK_MODELS,
+    ...coarenaModelChoices(env), ...GO_MODEL_IDS, ...FREE_FALLBACK_MODELS,
     ...Object.values(options.agentModels ?? {}).map((id) => id.split('#')[0]),
     ...[options.model, model].filter(Boolean).map((id) => id.split('#')[0]),
-  ])];
+  ].map(coarenaModelChoice))];
 }
 
 /**
@@ -1632,9 +1632,9 @@ async function runTui(mode, options) {
           const out = execFileSync(options.opencode ?? process.env.FACTORY_OPENCODE ?? 'opencode', ['models'], { encoding: 'utf8', timeout: 15000 });
           const allLines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
           const goLines = allLines.filter((line) => line.startsWith('opencode-go/'));
-          const lines = [...coarenaModels(), ...(goLines.length > 0 ? goLines : allLines)];
+          const lines = [...new Set([...coarenaModelChoices(), ...(goLines.length > 0 ? goLines : allLines)].map(coarenaModelChoice))];
           app.addLog(goLines.length > 0
-            ? 'models (Coarena keys + opencode-go catalog; run picks in order):'
+            ? 'models (Coarena automatic keys + opencode-go catalog):'
             : 'models (no opencode-go entries; showing full catalog):');
           lines.slice(0, 20).forEach((l) => app.addLog(` ${l}`));
           if (lines.length > 20) app.addLog(` … +${lines.length - 20} more`);

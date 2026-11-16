@@ -105,20 +105,20 @@ test('every agent can pick Coarena independently while the preset and other agen
       assert.ok(Object.values(before.agentModels).every((model) => model.startsWith('opencode-go/')));
       const key = `agent:${agent}`;
       const models = configModelChoices(options, key, { env: keys });
-      for (const id of ['coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2']) assert.ok(models.includes(id));
+      for (const id of ['coarena/claude-opus-5-5', 'coarena/claude-fable-5-2', 'coarena/gpt-6-luna', 'coarena/gemini-3-8-flash', 'coarena/deepseek-v4-1-flash-1017']) assert.ok(models.includes(id));
       const app = new App({ width: 60, height: 24, color: false });
       app.openConfig({ effectiveAgentModels: before.agentModels });
       app.openModelPicker(key, models, before.agentModels[agent]);
-      app.moveModelPicker(models.indexOf('coarena-2/claude-fable-5-2') - app.modelPicker.selected);
+      app.moveModelPicker(models.indexOf('coarena/claude-fable-5-2') - app.modelPicker.selected);
       assert.match(app.snapshot(), new RegExp(`Base model: ${agent.toUpperCase()}`));
       assert.match(app.snapshot(), new RegExp(`Only ${agent} will change`));
-      assert.match(app.snapshot(), /coarena-2\/claude-fable-5-2/);
+      assert.match(app.snapshot(), /coarena\/claude-fable-5-2/);
       const choice = app.modelPickerChoice();
       customizeModel(options, agent, choice.model, before);
       const after = effectiveAgentModels(options);
-      assert.equal(after[agent], 'coarena-2/claude-fable-5-2');
+      assert.equal(after[agent], 'coarena/claude-fable-5-2');
       for (const other of MODEL_AGENT_KEYS.filter((key) => key !== agent)) assert.equal(after[other], before.agentModels[other]);
-      assert.equal(Object.values(after).filter((model) => model.startsWith('coarena-')).length, 1);
+      assert.equal(Object.values(after).filter((model) => model.startsWith('coarena/')).length, 1);
       app.closeModelPicker();
       assert.equal(app.configView.open, true);
     }
@@ -131,7 +131,7 @@ test('Coarena choices remain visible when individual pickers open on late free m
     ...FREE_AGENT_MODELS,
     developer: 'opencode/nemotron-3.5-super-vl-free',
   };
-  const coarena = ['coarena-1/claude-opus-5-5', 'coarena-2/claude-opus-5-5', 'coarena-1/claude-fable-5-2', 'coarena-2/claude-fable-5-2'];
+  const coarena = ['coarena/claude-opus-5-5', 'coarena/claude-fable-5-2', 'coarena/gpt-6-luna', 'coarena/gemini-3-8-flash', 'coarena/deepseek-v4-1-flash-1017'];
   for (const [width, height] of [[60, 24], [100, 28], [100, 32]]) {
     for (const agent of MODEL_AGENT_KEYS) {
       const app = new App({ width, height, color: false });
@@ -164,6 +164,33 @@ test('model picker remains usable without Coarena credentials and with a short m
   assert.match(app.snapshot(), /opencode-go\/glm-5.3/);
   assert.match(app.snapshot(), /opencode-go\/kimi-k3.1-pro/);
   assert.doesNotMatch(app.snapshot(), /C Coarena/);
+});
+
+test('bulk and individual selectors show each Coarena model once with automatic keys and preserve legacy selection', () => {
+  const env = { COARENA_API_KEY_1: 'one', COARENA_API_KEY_2: 'two', COARENA_API_KEY_3: 'three', COARENA_API_KEY_4: 'four' };
+  const models = ['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6-luna', 'gemini-3-8-flash', 'deepseek-v4-1-flash-1017'].map((id) => `coarena/${id}`);
+  for (const [width, height] of [[60, 24], [100, 28], [100, 32]]) {
+    for (const key of ['model', ...MODEL_AGENT_KEYS.map((agent) => `agent:${agent}`)]) {
+      const options = { model: 'coarena-4/gpt-6-luna', agentModels: { developer: 'coarena-2/gpt-6-luna' } };
+      const choices = configModelChoices(options, key, { env });
+      assert.deepEqual(choices.filter((id) => id?.startsWith('coarena/')), models);
+      assert.ok(choices.every((id) => !/^coarena-\d+\//.test(id)));
+      const app = new App({ width, height, color: false });
+      app.openConfig({});
+      app.openModelPicker(key, choices, 'coarena-4/gpt-6-luna');
+      assert.equal(app.modelPickerChoice().model, 'coarena/gpt-6-luna');
+      for (const model of models) assert.ok(app.snapshot().includes(model));
+      app.openModelPicker(key, choices, 'opencode/nemotron-3.5-super-vl-free');
+      for (const model of models) assert.ok(app.snapshot().includes(model));
+      for (let i = 0; i < choices.length; i += 1) {
+        const frame = app.snapshot();
+        const selected = app.modelPickerChoice().model ?? 'Use the all-agent model';
+        assert.ok(frame.split('\n').some((line) => line.includes('› ') && line.includes(selected)));
+        assert.ok(frame.split('\n').every((line) => displayWidth(line) <= width));
+        app.moveModelPicker(1);
+      }
+    }
+  }
 });
 
 test('an individual Coarena worker fallback changes only that agent', async () => {
