@@ -487,7 +487,7 @@ export function launchRun(options = {}) {
  * variant) retries a different model too.
  */
 export function isTransientProviderError(text) {
-  return /provider\.quota|usage[ _-]+limits?|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
+  return /provider\.quota|usage[ _-]+limits?|payment[ _-]required|insufficient[ _-]balance|not part of the free tier|add credits|rate limit|429|no-route|unsupported package|variant unavailable|timeout|timed out|econnreset|etimedout|quota|limit (?:reached|exceeded|exhausted)|overloaded|capacity|too many|unavailable|exhausted|depleted|try again|try later|resource exhausted|model (?:is )?(?:currently )?(?:unavailable|overloaded)/i.test(String(text ?? ''));
 }
 
 /**

@@ -221,6 +221,12 @@ Low/Medium/High keep their OpenCode Go lineup even when Coarena keys are
 available. To use Coarena for just one agent, select that agent in `/config`.
 Individual retries change only the running agent's model.
 
+Coarena requires API credits for Fable 5.2 and Opus 5.5. A valid free-plan key
+alone does not unlock them. Add credits to the account that owns the key on
+[Coarena billing](https://coarena.ai/account/api/billing); the same configured
+key can then access these models. A paid-tier rejection tries the remaining
+keys and then OpenCode Go.
+
 Fill in `.env` beside `package.json` (see `.env.example`):
 
 ```dotenv
